@@ -1,30 +1,31 @@
-/// Handles tanpura drone playback.
+/// Contract for drone playback.
 ///
-/// Keeps audio logic separate from the Flutter UI. Playback against real
-/// recordings will be implemented later — this class defines the service
-/// boundary for V1 (play and pause).
-class AudioService {
-  bool _isPlaying = false;
-
+/// Implementations can be replaced later (for example to add pitch shifting
+/// or multi-note Sa/Pa/Ma playback) without changing the UI layer.
+abstract class AudioService {
   /// Whether the drone is currently playing.
-  bool get isPlaying => _isPlaying;
+  bool get isPlaying;
 
-  /// Starts drone playback.
-  ///
-  /// Not implemented yet. Will load and loop tanpura recordings.
-  Future<void> play() async {
-    throw UnimplementedError('Audio playback is not implemented yet.');
-  }
+  /// Loads the tanpura sample and prepares it for looping playback.
+  Future<void> load();
 
-  /// Pauses drone playback.
-  ///
-  /// Not implemented yet.
-  Future<void> pause() async {
-    throw UnimplementedError('Audio pause is not implemented yet.');
-  }
+  /// Starts (or resumes) looping playback.
+  Future<void> play();
+
+  /// Pauses playback.
+  Future<void> pause();
 
   /// Releases audio resources.
-  Future<void> dispose() async {
-    _isPlaying = false;
-  }
+  Future<void> dispose();
+}
+
+/// Thrown when audio loading or playback fails.
+class AudioServiceException implements Exception {
+  AudioServiceException(this.message, [this.cause]);
+
+  final String message;
+  final Object? cause;
+
+  @override
+  String toString() => 'AudioServiceException: $message';
 }
