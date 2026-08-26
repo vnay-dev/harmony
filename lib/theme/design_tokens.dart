@@ -24,4 +24,8 @@ class DesignTokens {
   static const double fontSizeBody = 16;
   static const double fontSizeTitle = 24;
   static const double fontSizeDisplay = 32;
+
+  // Shape & controls
+  static const double radiusMd = 12;
+  static const double controlHeight = 56;
 }
