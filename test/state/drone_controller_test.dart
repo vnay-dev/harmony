@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:harmony/audio/audio_assets.dart';
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/state/drone_controller.dart';
 
@@ -24,11 +25,11 @@ void main() {
     expect(controller.errorMessage, isNull);
   });
 
-  test('initialize loads the audio sample', () async {
+  test('initialize loads the default C sample', () async {
     await controller.initialize();
 
     expect(audioService.loadCount, 1);
-    expect(audioService.loaded, isTrue);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.c));
     expect(controller.errorMessage, isNull);
     expect(controller.isBusy, isFalse);
   });
@@ -42,10 +43,61 @@ void main() {
     expect(controller.isPlaying, isFalse);
   });
 
-  test('selectPitch updates the selected Sa', () {
-    controller.selectPitch(Pitch.g);
+  test('selectPitch while paused only updates selected state', () async {
+    await controller.initialize();
+    final loadCountBefore = audioService.loadCount;
 
-    expect(controller.selectedPitch, Pitch.g);
+    await controller.selectPitch(Pitch.d);
+
+    expect(controller.selectedPitch, Pitch.d);
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.loadCount, loadCountBefore);
+    expect(audioService.playCount, 0);
+  });
+
+  test('selectPitch can change every Sa option', () async {
+    await controller.initialize();
+
+    for (final pitch in Pitch.values) {
+      await controller.selectPitch(pitch);
+      expect(controller.selectedPitch, pitch);
+    }
+  });
+
+  test('selectPitch while playing switches to the matching sample', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    final pauseCountBefore = audioService.pauseCount;
+
+    await controller.selectPitch(Pitch.cSharp);
+
+    expect(controller.isPlaying, isTrue);
+    expect(controller.selectedPitch, Pitch.cSharp);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.cSharp));
+    expect(audioService.pauseCount, pauseCountBefore);
+  });
+
+  test('selectPitch while playing switches across available samples', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+
+    for (final pitch in [Pitch.d, Pitch.g, Pitch.b, Pitch.c]) {
+      await controller.selectPitch(pitch);
+      expect(controller.isPlaying, isTrue);
+      expect(audioService.currentAsset, AudioAssets.sampleFor(pitch));
+    }
+  });
+
+  test('play loads the selected sample that was chosen while paused', () async {
+    await controller.initialize();
+    await controller.selectPitch(Pitch.aSharp);
+
+    await controller.togglePlayback();
+
+    expect(controller.isPlaying, isTrue);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.aSharp));
   });
 
   test('togglePlayback plays then pauses', () async {
@@ -61,6 +113,7 @@ void main() {
   });
 
   test('togglePlayback surfaces play errors', () async {
+    await controller.initialize();
     audioService.failPlay = true;
 
     await controller.togglePlayback();

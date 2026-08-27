@@ -2,27 +2,39 @@ import 'dart:async';
 
 import 'package:just_audio/just_audio.dart';
 
-import 'package:harmony/audio/audio_assets.dart';
 import 'package:harmony/audio/audio_service.dart';
 
-/// [AudioService] backed by `just_audio` for looping tanpura playback.
+/// [AudioService] backed by `just_audio` for looping tanpura sample playback.
 class JustAudioService implements AudioService {
   JustAudioService({AudioPlayer? player}) : _player = player ?? AudioPlayer();
 
   final AudioPlayer _player;
-  bool _isLoaded = false;
+  String? _currentAsset;
 
   @override
   bool get isPlaying => _player.playing;
 
   @override
-  Future<void> load() async {
+  String? get currentAsset => _currentAsset;
+
+  @override
+  Future<void> load(String assetPath) async {
+    if (_currentAsset == assetPath) {
+      return;
+    }
+
+    final wasPlaying = _player.playing;
+
     try {
-      await _player.setAsset(AudioAssets.tanpuraSample);
+      await _player.setAsset(assetPath);
       await _player.setLoopMode(LoopMode.one);
-      _isLoaded = true;
+      _currentAsset = assetPath;
+      if (wasPlaying) {
+        // Resume after the sample swap; do not await play() (see [play]).
+        unawaited(_player.play());
+      }
     } catch (error, stackTrace) {
-      _isLoaded = false;
+      _currentAsset = null;
       Error.throwWithStackTrace(
         AudioServiceException('Failed to load the tanpura sample.', error),
         stackTrace,
@@ -33,8 +45,8 @@ class JustAudioService implements AudioService {
   @override
   Future<void> play() async {
     try {
-      if (!_isLoaded) {
-        await load();
+      if (_currentAsset == null) {
+        throw AudioServiceException('No tanpura sample is loaded.');
       }
       // just_audio's play() Future completes when playback ends or is paused,
       // not when it starts. With looping, awaiting it would hang forever and
@@ -65,7 +77,7 @@ class JustAudioService implements AudioService {
 
   @override
   Future<void> dispose() async {
-    _isLoaded = false;
+    _currentAsset = null;
     await _player.dispose();
   }
 }

@@ -38,6 +38,24 @@ void main() {
     expect(find.text(Pitch.g.label), findsWidgets);
   });
 
+  testWidgets('all 12 pitch options can be selected', (tester) async {
+    await pumpApp(tester);
+
+    for (final pitch in Pitch.values) {
+      await tester.ensureVisible(find.text(pitch.label).last);
+      await tester.tap(find.text(pitch.label).last);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(Scaffold),
+          matching: find.text(pitch.label),
+        ),
+        findsWidgets,
+      );
+    }
+  });
+
   testWidgets('play and pause update the button label', (tester) async {
     await pumpApp(tester);
 
@@ -52,5 +70,22 @@ void main() {
     await tester.tap(pauseFinder);
     await tester.pumpAndSettle();
     expect(find.text('Play'), findsOneWidget);
+  });
+
+  testWidgets('pitch can change while playing without stopping', (
+    tester,
+  ) async {
+    await pumpApp(tester);
+
+    await tester.ensureVisible(find.text('Play'));
+    await tester.tap(find.text('Play'));
+    await tester.pumpAndSettle();
+    expect(find.text('Pause'), findsOneWidget);
+
+    await tester.tap(find.text('D'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pause'), findsOneWidget);
+    expect(find.text(Pitch.d.label), findsWidgets);
   });
 }

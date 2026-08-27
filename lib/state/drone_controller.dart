@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import 'package:harmony/audio/audio_assets.dart';
 import 'package:harmony/audio/audio_service.dart';
 import 'package:harmony/models/pitch.dart';
 
@@ -22,14 +23,18 @@ class DroneController extends ChangeNotifier {
   bool get isBusy => _isBusy;
   String? get errorMessage => _errorMessage;
 
-  /// Loads the tanpura sample so play can start quickly.
+  /// Loads the default Sa sample so play can start quickly.
   Future<void> initialize() async {
     _isBusy = true;
     _errorMessage = null;
     notifyListeners();
 
     try {
-      await _audioService.load();
+      final asset = AudioAssets.sampleFor(_selectedPitch);
+      if (asset == null) {
+        throw AudioServiceException('No tanpura sample is available for Sa.');
+      }
+      await _audioService.load(asset);
     } on AudioServiceException catch (error) {
       _errorMessage = error.message;
     } catch (_) {
@@ -40,16 +45,50 @@ class DroneController extends ChangeNotifier {
     }
   }
 
-  /// Updates the selected Sa pitch.
+  /// Updates the selected Sa.
   ///
-  /// Pitch shifting is not implemented yet, so the same C sample continues
-  /// to play for every selection.
-  void selectPitch(Pitch pitch) {
+  /// While paused, only app state changes. While playing, switches to the
+  /// matching sample when one exists; otherwise pauses so audio does not
+  /// continue under the wrong pitch.
+  Future<void> selectPitch(Pitch pitch) async {
     if (_selectedPitch == pitch) {
       return;
     }
+
     _selectedPitch = pitch;
+    _errorMessage = null;
     notifyListeners();
+
+    if (!_isPlaying) {
+      return;
+    }
+
+    final asset = AudioAssets.sampleFor(pitch);
+    if (asset == null) {
+      try {
+        await _audioService.pause();
+      } on AudioServiceException catch (error) {
+        _errorMessage = error.message;
+      } catch (_) {
+        _errorMessage = 'Failed to pause playback.';
+      }
+      _isPlaying = false;
+      _errorMessage ??= 'No sample available for ${pitch.label} yet.';
+      notifyListeners();
+      return;
+    }
+
+    try {
+      await _audioService.load(asset);
+    } on AudioServiceException catch (error) {
+      _errorMessage = error.message;
+      _isPlaying = _audioService.isPlaying;
+      notifyListeners();
+    } catch (_) {
+      _errorMessage = 'Failed to load the tanpura sample.';
+      _isPlaying = _audioService.isPlaying;
+      notifyListeners();
+    }
   }
 
   /// Toggles between play and pause.
@@ -67,6 +106,13 @@ class DroneController extends ChangeNotifier {
         await _audioService.pause();
         _isPlaying = false;
       } else {
+        final asset = AudioAssets.sampleFor(_selectedPitch);
+        if (asset == null) {
+          _errorMessage =
+              'No sample available for ${_selectedPitch.label} yet.';
+          return;
+        }
+        await _audioService.load(asset);
         await _audioService.play();
         _isPlaying = true;
       }

@@ -21,4 +21,4 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/audio/Tanpura_sample_C_pitch.m4a
+    - assets/audio/pa/
