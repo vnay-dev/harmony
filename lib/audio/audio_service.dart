@@ -1,15 +1,21 @@
 /// Contract for drone playback.
 ///
-/// Implementations can be replaced later (for example to add pitch shifting
-/// or multi-note Sa/Pa/Ma playback) without changing the UI layer.
+/// Implementations can be replaced later (for example to add multi-note
+/// Sa/Pa/Ma playback) without changing the UI layer.
 abstract class AudioService {
   /// Whether the drone is currently playing.
   bool get isPlaying;
 
-  /// Loads the tanpura sample and prepares it for looping playback.
-  Future<void> load();
+  /// Asset path currently loaded, if any.
+  String? get currentAsset;
 
-  /// Starts (or resumes) looping playback.
+  /// Loads [assetPath] for looping playback.
+  ///
+  /// If playback is already active, continues with the new sample. No-ops when
+  /// [assetPath] is already loaded.
+  Future<void> load(String assetPath);
+
+  /// Starts (or resumes) looping playback of the loaded sample.
   Future<void> play();
 
   /// Pauses playback.
