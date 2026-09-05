@@ -7,6 +7,7 @@ import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
 import 'package:harmony/ui/components/pitch_selector.dart';
 import 'package:harmony/ui/components/play_pause_button.dart';
+import 'package:harmony/ui/screens/pitch_listen_screen.dart';
 
 /// Main Shruti drone screen: Sa selection and play/pause.
 class HomeScreen extends StatefulWidget {
@@ -90,6 +91,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 isPlaying: _controller.isPlaying,
                 isBusy: _controller.isBusy,
                 onPressed: _controller.togglePlayback,
+              ),
+              const SizedBox(height: DesignTokens.spaceMd),
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const PitchListenScreen(),
+                    ),
+                  );
+                },
+                child: const Text('Detect pitch'),
               ),
             ],
           ),

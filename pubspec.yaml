@@ -12,6 +12,8 @@ dependencies:
   flutter:
     sdk: flutter
   just_audio: ^0.10.6
+  pitch_detector_dart: ^0.0.7
+  record: ^6.2.1
 
 dev_dependencies:
   flutter_test:
