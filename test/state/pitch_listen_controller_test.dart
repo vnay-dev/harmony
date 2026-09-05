@@ -25,6 +25,7 @@ void main() {
     expect(controller.frequencyHz, isNull);
     expect(controller.note, isNull);
     expect(controller.isPitchStable, isFalse);
+    expect(controller.noteSequence, isEmpty);
   });
 
   test('startListening enables listening', () async {
@@ -173,6 +174,8 @@ void main() {
 
     expect(tuned.note, Pitch.d);
     expect(tuned.isPitchStable, isTrue);
+    expect(tuned.noteSequence, [Pitch.d]);
+    expect(tuned.noteSequenceLabel, 'D');
   });
 
   test('pitch changes make the reading unstable until it settles', () async {
@@ -222,5 +225,63 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(tuned.isPitchStable, isTrue);
+    expect(tuned.noteSequence, [Pitch.d, Pitch.e]);
+    expect(tuned.noteSequenceLabel, 'D → E');
+  });
+
+  test('builds a note sequence across several stable pitches', () async {
+    final service = FakePitchDetectionService();
+    final tuned = PitchListenController(
+      detectionService: service,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 2,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+    addTearDown(tuned.dispose);
+
+    await tuned.startListening();
+
+    // From unstable: 2 matching samples stabilize.
+    // From a different stable note: 2 mismatches leave stability, then more
+    // matching samples restabilize on the new note.
+    Future<void> settle(double hz) async {
+      for (var i = 0; i < 4; i++) {
+        service.emit(PitchReading(hasPitch: true, frequencyHz: hz, note: null));
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    await settle(146.8); // D
+    await settle(164.8); // E
+    await settle(185.0); // F#
+    await settle(164.8); // E
+    await settle(146.8); // D
+
+    expect(tuned.noteSequenceLabel, 'D → E → F# → E → D');
+  });
+
+  test('holding one stable note does not repeat it in the sequence', () async {
+    final service = FakePitchDetectionService();
+    final tuned = PitchListenController(
+      detectionService: service,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 2,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+    addTearDown(tuned.dispose);
+
+    await tuned.startListening();
+
+    for (var i = 0; i < 8; i++) {
+      service.emit(
+        const PitchReading(hasPitch: true, frequencyHz: 146.8, note: Pitch.d),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(tuned.isPitchStable, isTrue);
+    expect(tuned.noteSequence, [Pitch.d]);
   });
 }

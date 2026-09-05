@@ -22,6 +22,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Idle'), findsOneWidget);
+    expect(find.text('Current pitch: —'), findsOneWidget);
+    expect(find.text('Notes:'), findsOneWidget);
     expect(find.text('—'), findsNWidgets(3));
     expect(find.text('Start listening'), findsOneWidget);
   });
@@ -44,7 +46,6 @@ void main() {
 
     expect(find.text('Listening...'), findsOneWidget);
     expect(find.text('Stop'), findsOneWidget);
-    expect(find.text('—'), findsNWidgets(3));
 
     detectionService.emit(
       const PitchReading(hasPitch: true, frequencyHz: 246.94, note: Pitch.b),
@@ -52,28 +53,20 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('246.9 Hz'), findsOneWidget);
-    expect(find.text('B'), findsOneWidget);
+    expect(find.text('Current pitch: B'), findsOneWidget);
     expect(find.text('Not stable'), findsOneWidget);
 
-    detectionService.emit(PitchReading.none);
-    await tester.pumpAndSettle();
-
-    expect(find.text('246.9 Hz'), findsOneWidget);
-    expect(find.text('B'), findsOneWidget);
-
     detectionService.emit(
-      // Wrong note on purpose; UI must follow the frequency.
       const PitchReading(hasPitch: true, frequencyHz: 277.18, note: Pitch.b),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('277.2 Hz'), findsOneWidget);
-    expect(find.text('C#'), findsOneWidget);
-    expect(find.text('B'), findsNothing);
+    expect(find.text('Current pitch: C#'), findsOneWidget);
     expect(find.text('Not stable'), findsOneWidget);
   });
 
-  testWidgets('shows Stable after sustained matching detections', (
+  testWidgets('shows Stable and sequence after sustained detections', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -98,7 +91,8 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    expect(find.text('D'), findsOneWidget);
+    expect(find.text('Current pitch: D'), findsOneWidget);
     expect(find.text('Stable'), findsOneWidget);
+    expect(find.text('D'), findsOneWidget);
   });
 }

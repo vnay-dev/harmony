@@ -54,12 +54,15 @@ class _PitchListenScreenState extends State<PitchListenScreen> {
     final frequency = _controller.frequencyHz;
     final note = _controller.note;
     final errorMessage = _controller.errorMessage;
+    final sequenceLabel = _controller.noteSequenceLabel;
 
     final statusLabel = _controller.isListening ? 'Listening...' : 'Idle';
     final frequencyLabel = frequency == null
         ? '—'
         : '${frequency.toStringAsFixed(1)} Hz';
-    final noteLabel = note?.label ?? '—';
+    final currentPitchLabel = note == null
+        ? 'Current pitch: —'
+        : 'Current pitch: ${note.label}';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Pitch detection')),
@@ -84,8 +87,8 @@ class _PitchListenScreenState extends State<PitchListenScreen> {
               ),
               const SizedBox(height: DesignTokens.spaceMd),
               Text(
-                noteLabel,
-                key: ValueKey<String>('note-$noteLabel'),
+                currentPitchLabel,
+                key: ValueKey<String>('current-pitch-$currentPitchLabel'),
                 style: textTheme.displaySmall?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
@@ -96,6 +99,19 @@ class _PitchListenScreenState extends State<PitchListenScreen> {
                 _stabilityLabel(),
                 key: ValueKey<String>('stability-${_controller.isPitchStable}'),
                 style: textTheme.bodyLarge,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: DesignTokens.spaceXl),
+              Text(
+                'Notes:',
+                style: textTheme.bodyLarge,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: DesignTokens.spaceSm),
+              Text(
+                sequenceLabel,
+                key: ValueKey<String>('sequence-$sequenceLabel'),
+                style: textTheme.titleLarge,
                 textAlign: TextAlign.center,
               ),
               if (errorMessage != null) ...[
