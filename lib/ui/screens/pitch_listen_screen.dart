@@ -41,6 +41,13 @@ class _PitchListenScreenState extends State<PitchListenScreen> {
     super.dispose();
   }
 
+  String _stabilityLabel() {
+    if (!_controller.isListening || _controller.note == null) {
+      return '—';
+    }
+    return _controller.isPitchStable ? 'Stable' : 'Not stable';
+  }
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
@@ -82,6 +89,13 @@ class _PitchListenScreenState extends State<PitchListenScreen> {
                 style: textTheme.displaySmall?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: DesignTokens.spaceMd),
+              Text(
+                _stabilityLabel(),
+                key: ValueKey<String>('stability-${_controller.isPitchStable}'),
+                style: textTheme.bodyLarge,
                 textAlign: TextAlign.center,
               ),
               if (errorMessage != null) ...[

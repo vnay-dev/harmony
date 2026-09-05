@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
+import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/state/pitch_listen_controller.dart';
 
 import '../support/fake_pitch_detection_service.dart';
@@ -23,6 +24,7 @@ void main() {
     expect(controller.isListening, isFalse);
     expect(controller.frequencyHz, isNull);
     expect(controller.note, isNull);
+    expect(controller.isPitchStable, isFalse);
   });
 
   test('startListening enables listening', () async {
@@ -146,5 +148,79 @@ void main() {
     expect(controller.isListening, isTrue);
     expect(controller.frequencyHz, isNull);
     expect(controller.note, isNull);
+    expect(controller.isPitchStable, isFalse);
+  });
+
+  test('marks a sustained note as stable', () async {
+    final service = FakePitchDetectionService();
+    final tuned = PitchListenController(
+      detectionService: service,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+    addTearDown(tuned.dispose);
+
+    await tuned.startListening();
+
+    for (var i = 0; i < 3; i++) {
+      service.emit(
+        const PitchReading(hasPitch: true, frequencyHz: 146.8, note: Pitch.d),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(tuned.note, Pitch.d);
+    expect(tuned.isPitchStable, isTrue);
+  });
+
+  test('pitch changes make the reading unstable until it settles', () async {
+    final service = FakePitchDetectionService();
+    final tuned = PitchListenController(
+      detectionService: service,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+    addTearDown(tuned.dispose);
+
+    await tuned.startListening();
+
+    for (var i = 0; i < 3; i++) {
+      service.emit(
+        const PitchReading(hasPitch: true, frequencyHz: 146.8, note: Pitch.d),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(tuned.isPitchStable, isTrue);
+
+    service.emit(
+      const PitchReading(hasPitch: true, frequencyHz: 164.8, note: Pitch.e),
+    );
+    await Future<void>.delayed(Duration.zero);
+    service.emit(
+      const PitchReading(hasPitch: true, frequencyHz: 164.8, note: Pitch.e),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(tuned.note, Pitch.e);
+    expect(tuned.isPitchStable, isFalse);
+
+    service.emit(
+      const PitchReading(hasPitch: true, frequencyHz: 164.8, note: Pitch.e),
+    );
+    await Future<void>.delayed(Duration.zero);
+    service.emit(
+      const PitchReading(hasPitch: true, frequencyHz: 164.8, note: Pitch.e),
+    );
+    await Future<void>.delayed(Duration.zero);
+    service.emit(
+      const PitchReading(hasPitch: true, frequencyHz: 164.8, note: Pitch.e),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(tuned.isPitchStable, isTrue);
   });
 }
