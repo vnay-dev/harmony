@@ -20,6 +20,9 @@ class FakePitchDetectionService implements PitchDetectionService {
   bool get isListening => _isListening;
 
   void emit(PitchReading reading) {
+    if (_controller.isClosed) {
+      return;
+    }
     _controller.add(reading);
   }
 
@@ -36,13 +39,17 @@ class FakePitchDetectionService implements PitchDetectionService {
   Future<void> stop() async {
     stopCount += 1;
     _isListening = false;
-    _controller.add(PitchReading.none);
+    if (!_controller.isClosed) {
+      _controller.add(PitchReading.none);
+    }
   }
 
   @override
   Future<void> dispose() async {
     disposeCount += 1;
-    await stop();
-    await _controller.close();
+    _isListening = false;
+    if (!_controller.isClosed) {
+      await _controller.close();
+    }
   }
 }

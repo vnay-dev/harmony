@@ -22,7 +22,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Idle'), findsOneWidget);
-    expect(find.text('—'), findsNWidgets(2));
+    expect(find.text('—'), findsNWidgets(3));
     expect(find.text('Start listening'), findsOneWidget);
   });
 
@@ -44,7 +44,7 @@ void main() {
 
     expect(find.text('Listening...'), findsOneWidget);
     expect(find.text('Stop'), findsOneWidget);
-    expect(find.text('—'), findsNWidgets(2));
+    expect(find.text('—'), findsNWidgets(3));
 
     detectionService.emit(
       const PitchReading(hasPitch: true, frequencyHz: 246.94, note: Pitch.b),
@@ -53,6 +53,7 @@ void main() {
 
     expect(find.text('246.9 Hz'), findsOneWidget);
     expect(find.text('B'), findsOneWidget);
+    expect(find.text('Not stable'), findsOneWidget);
 
     detectionService.emit(PitchReading.none);
     await tester.pumpAndSettle();
@@ -69,5 +70,35 @@ void main() {
     expect(find.text('277.2 Hz'), findsOneWidget);
     expect(find.text('C#'), findsOneWidget);
     expect(find.text('B'), findsNothing);
+    expect(find.text('Not stable'), findsOneWidget);
+  });
+
+  testWidgets('shows Stable after sustained matching detections', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detectionService = FakePitchDetectionService();
+
+    await tester.pumpWidget(
+      MaterialApp(home: PitchListenScreen(detectionService: detectionService)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Start listening'));
+    await tester.pumpAndSettle();
+
+    for (var i = 0; i < 6; i++) {
+      detectionService.emit(
+        const PitchReading(hasPitch: true, frequencyHz: 146.8, note: Pitch.d),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    expect(find.text('D'), findsOneWidget);
+    expect(find.text('Stable'), findsOneWidget);
   });
 }
