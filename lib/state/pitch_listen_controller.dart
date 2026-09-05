@@ -4,19 +4,23 @@ import 'package:flutter/foundation.dart';
 
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/pitch/frequency_to_note.dart';
+import 'package:harmony/pitch/note_sequence_tracker.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
 
-/// App state for live microphone pitch listening and stability.
+/// App state for live microphone pitch listening, stability, and note sequence.
 class PitchListenController extends ChangeNotifier {
   PitchListenController({
     required PitchDetectionService detectionService,
     PitchStabilityTracker? stabilityTracker,
+    NoteSequenceTracker? noteSequenceTracker,
   }) : _detectionService = detectionService,
-       _stabilityTracker = stabilityTracker ?? PitchStabilityTracker();
+       _stabilityTracker = stabilityTracker ?? PitchStabilityTracker(),
+       _noteSequenceTracker = noteSequenceTracker ?? NoteSequenceTracker();
 
   final PitchDetectionService _detectionService;
   final PitchStabilityTracker _stabilityTracker;
+  final NoteSequenceTracker _noteSequenceTracker;
 
   StreamSubscription<PitchReading>? _readingsSubscription;
   bool _isListening = false;
@@ -30,6 +34,8 @@ class PitchListenController extends ChangeNotifier {
   double? get frequencyHz => _frequencyHz;
   Pitch? get note => _note;
   bool get isPitchStable => _stabilityTracker.isStable;
+  List<Pitch> get noteSequence => _noteSequenceTracker.notes;
+  String get noteSequenceLabel => _noteSequenceTracker.displayLabel;
   String? get errorMessage => _errorMessage;
 
   /// Requests mic access (if needed) and starts live detection.
@@ -41,6 +47,7 @@ class PitchListenController extends ChangeNotifier {
     _isBusy = true;
     _errorMessage = null;
     _stabilityTracker.reset();
+    _noteSequenceTracker.reset();
     notifyListeners();
 
     try {
@@ -80,6 +87,7 @@ class PitchListenController extends ChangeNotifier {
       _frequencyHz = null;
       _note = null;
       _stabilityTracker.reset();
+      // Keep [noteSequence] visible after stop for review; cleared on next start.
     } on PitchDetectionException catch (error) {
       _errorMessage = error.message;
     } catch (_) {
@@ -115,7 +123,17 @@ class PitchListenController extends ChangeNotifier {
 
     _frequencyHz = frequency;
     _note = note;
+
+    final wasStable = _stabilityTracker.isStable;
     _stabilityTracker.add(note);
+    final becameStable = !wasStable && _stabilityTracker.isStable;
+    if (becameStable) {
+      final stablePitch = _stabilityTracker.stablePitch;
+      if (stablePitch != null) {
+        _noteSequenceTracker.onStablePitch(stablePitch);
+      }
+    }
+
     notifyListeners();
   }
 
