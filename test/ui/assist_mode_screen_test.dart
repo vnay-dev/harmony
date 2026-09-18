@@ -182,6 +182,11 @@ void main() {
       );
       expect(find.text(Pitch.cSharp.label), findsOneWidget);
       expect(find.text('Play My Shruti'), findsOneWidget);
+      expect(find.text('Try Again'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-try-again')),
+        findsOneWidget,
+      );
       expect(find.text('Done'), findsNothing);
       expect(find.textContaining('Hz'), findsNothing);
       expect(assistAudio.isPlaying, isTrue);
@@ -356,6 +361,119 @@ void main() {
       expect(find.text(Pitch.g.label), findsOneWidget);
 
       hold.complete();
+    },
+  );
+
+  testWidgets(
+    'Try Again restarts Assist Mode without changing Default Mode selection',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final droneAudio = FakeAudioService();
+      final drone = DroneController(audioService: droneAudio);
+      addTearDown(drone.dispose);
+      await drone.initialize();
+      await drone.selectPitch(Pitch.g);
+      expect(drone.selectedPitch, Pitch.g);
+      expect(drone.isPlaying, isFalse);
+
+      final detection = FakePitchDetectionService();
+      final assistAudio = FakeAudioService();
+      late final AssistModeController assistController;
+      var pass = 0;
+
+      await tester.runAsync(() async {
+        assistController = AssistModeController(
+          detectionService: detection,
+          audioService: assistAudio,
+          candidateFinder: buildFinder(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            if (assistController.uiPhase == AssistUiPhase.listening) {
+              emitStable(detection, pass == 0 ? Pitch.cSharp : Pitch.a);
+            }
+          },
+        );
+        await assistController.startSession();
+        expect(assistController.uiPhase, AssistUiPhase.completed);
+        expect(assistController.referencePitch, Pitch.cSharp);
+      });
+      addTearDown(assistController.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: ListenableBuilder(
+            listenable: drone,
+            builder: (context, _) {
+              return Scaffold(
+                body: Column(
+                  children: [
+                    Text(
+                      drone.selectedPitch.label,
+                      key: const ValueKey<String>('default-selected-pitch'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final pitch = await Navigator.of(context).push<Pitch>(
+                          MaterialPageRoute<Pitch>(
+                            builder: (_) =>
+                                AssistModeScreen(controller: assistController),
+                          ),
+                        );
+                        if (pitch != null) {
+                          await drone.playPitch(pitch);
+                        }
+                      },
+                      child: const Text('Assist Mode'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Assist Mode'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Play My Shruti'), findsOneWidget);
+      expect(find.text('Try Again'), findsOneWidget);
+      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(assistAudio.isPlaying, isTrue);
+
+      pass = 1;
+      await tester.runAsync(() async {
+        final restart = assistController.tryAgain();
+        await tester.pump();
+        await restart;
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('Play My Shruti'), findsOneWidget);
+      expect(find.text('Try Again'), findsOneWidget);
+      expect(find.text(Pitch.a.label), findsOneWidget);
+      expect(find.text(Pitch.cSharp.label), findsNothing);
+      expect(assistController.referencePitch, Pitch.a);
+      expect(assistAudio.isPlaying, isTrue);
+
+      // Still on Assist completion — Default Mode must be untouched.
+      expect(drone.selectedPitch, Pitch.g);
+      expect(drone.isPlaying, isFalse);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      expect(drone.selectedPitch, Pitch.g);
+      expect(drone.isPlaying, isFalse);
+      expect(find.text(Pitch.g.label), findsOneWidget);
     },
   );
 }
