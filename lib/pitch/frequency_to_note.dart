@@ -16,3 +16,29 @@ Pitch? noteFromFrequency(double frequencyHz) {
   final normalizedIndex = noteIndex < 0 ? noteIndex + 12 : noteIndex;
   return Pitch.values[normalizedIndex];
 }
+
+/// Equal-tempered frequency in Hz for [pitch] at [octave].
+///
+/// Uses A4 = 440 Hz. Octave numbering follows scientific pitch (C4 = middle C).
+/// Harmony tanpura samples are tuned around octave 3.
+double frequencyHzForPitch(Pitch pitch, {int octave = 3}) {
+  final midi = (octave + 1) * 12 + pitch.index;
+  return 440.0 * math.pow(2, (midi - 69) / 12);
+}
+
+/// Pitch distance from [referenceHz] to [frequencyHz] in cents.
+///
+/// Positive when [frequencyHz] is sharp of [referenceHz]. Returns `null` when
+/// either frequency is non-positive or non-finite.
+double? centsBetweenFrequencies(double frequencyHz, double referenceHz) {
+  if (frequencyHz <= 0 ||
+      referenceHz <= 0 ||
+      frequencyHz.isNaN ||
+      referenceHz.isNaN ||
+      frequencyHz.isInfinite ||
+      referenceHz.isInfinite) {
+    return null;
+  }
+
+  return 1200 * (math.log(frequencyHz / referenceHz) / math.ln2);
+}

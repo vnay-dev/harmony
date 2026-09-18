@@ -5,7 +5,7 @@ import 'package:harmony/pitch/pitch_detection_service.dart';
 /// In-memory [PitchDetectionService] for tests.
 class FakePitchDetectionService implements PitchDetectionService {
   final StreamController<PitchReading> _controller =
-      StreamController<PitchReading>.broadcast();
+      StreamController<PitchReading>.broadcast(sync: true);
 
   bool failStart = false;
   int startCount = 0;

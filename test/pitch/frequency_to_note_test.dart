@@ -23,4 +23,26 @@ void main() {
     expect(noteFromFrequency(-10), isNull);
     expect(noteFromFrequency(double.nan), isNull);
   });
+
+  test('centsBetweenFrequencies is zero for identical pitches', () {
+    expect(centsBetweenFrequencies(440, 440), closeTo(0, 1e-9));
+  });
+
+  test('centsBetweenFrequencies measures semitone and direction', () {
+    // One equal-tempered semitone above A4.
+    expect(centsBetweenFrequencies(466.16, 440), closeTo(100, 0.1));
+    expect(centsBetweenFrequencies(415.30, 440), closeTo(-100, 0.1));
+  });
+
+  test('centsBetweenFrequencies returns null for invalid inputs', () {
+    expect(centsBetweenFrequencies(0, 440), isNull);
+    expect(centsBetweenFrequencies(440, -1), isNull);
+    expect(centsBetweenFrequencies(double.nan, 440), isNull);
+  });
+
+  test('frequencyHzForPitch matches common octave-3 Sa targets', () {
+    expect(frequencyHzForPitch(Pitch.c), closeTo(130.81, 0.05));
+    expect(frequencyHzForPitch(Pitch.d), closeTo(146.83, 0.05));
+    expect(frequencyHzForPitch(Pitch.a, octave: 4), closeTo(440.0, 0.01));
+  });
 }

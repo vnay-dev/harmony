@@ -10,33 +10,33 @@ void main() {
   test('maps every Sa pitch to its Pa tanpura sample', () {
     expect(AudioAssets.tanpuraSamplesByPitch.length, Pitch.values.length);
 
-    expect(AudioAssets.sampleFor(Pitch.c), 'assets/audio/pa/tanpura_c3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.c), 'assets/audio/pilot/tanpura_C.mp3');
     expect(
       AudioAssets.sampleFor(Pitch.cSharp),
-      'assets/audio/pa/tanpura_csharp3.m4a',
+      'assets/audio/pilot/tanpura_Ccis.mp3',
     );
-    expect(AudioAssets.sampleFor(Pitch.d), 'assets/audio/pa/tanpura_d3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.d), 'assets/audio/pilot/tanpura_D.mp3');
     expect(
       AudioAssets.sampleFor(Pitch.dSharp),
-      'assets/audio/pa/tanpura_dsharp3.m4a',
+      'assets/audio/pilot/tanpura_Dcis.mp3',
     );
-    expect(AudioAssets.sampleFor(Pitch.e), 'assets/audio/pa/tanpura_e3.m4a');
-    expect(AudioAssets.sampleFor(Pitch.f), 'assets/audio/pa/tanpura_f3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.e), 'assets/audio/pilot/tanpura_E.mp3');
+    expect(AudioAssets.sampleFor(Pitch.f), 'assets/audio/pilot/tanpura_F.mp3');
     expect(
       AudioAssets.sampleFor(Pitch.fSharp),
-      'assets/audio/pa/tanpura_fsharp3.m4a',
+      'assets/audio/pilot/tanpura_Fcis.mp3',
     );
-    expect(AudioAssets.sampleFor(Pitch.g), 'assets/audio/pa/tanpura_g3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.g), 'assets/audio/pilot/tanpura_G.mp3');
     expect(
       AudioAssets.sampleFor(Pitch.gSharp),
-      'assets/audio/pa/tanpura_gsharp3.m4a',
+      'assets/audio/pilot/tanpura_Gcis.mp3',
     );
-    expect(AudioAssets.sampleFor(Pitch.a), 'assets/audio/pa/tanpura_a3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.a), 'assets/audio/pilot/tanpura_A.mp3');
     expect(
       AudioAssets.sampleFor(Pitch.aSharp),
-      'assets/audio/pa/tanpura_asharp3.m4a',
+      'assets/audio/pilot/tanpura_Acis.mp3',
     );
-    expect(AudioAssets.sampleFor(Pitch.b), 'assets/audio/pa/tanpura_b3.m4a');
+    expect(AudioAssets.sampleFor(Pitch.b), 'assets/audio/pilot/tanpura_B.mp3');
   });
 
   test('every Sa pitch has a sample', () {
@@ -61,7 +61,7 @@ void main() {
     await service.play();
 
     expect(service.loaded, isTrue);
-    expect(service.currentAsset, 'assets/audio/pa/tanpura_c3.m4a');
+    expect(service.currentAsset, 'assets/audio/pilot/tanpura_C.mp3');
     expect(service.isPlaying, isTrue);
   });
 
@@ -90,7 +90,7 @@ void main() {
     final service = FakeAudioService()..failLoad = true;
 
     expect(
-      () => service.load('assets/audio/pa/tanpura_c3.m4a'),
+      () => service.load('assets/audio/pilot/tanpura_C.mp3'),
       throwsA(isA<AudioServiceException>()),
     );
   });

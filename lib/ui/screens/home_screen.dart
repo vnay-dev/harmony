@@ -3,11 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:harmony/app/app_config.dart';
 import 'package:harmony/audio/audio_service.dart';
 import 'package:harmony/audio/just_audio_service.dart';
+import 'package:harmony/models/pitch.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
 import 'package:harmony/ui/components/pitch_selector.dart';
 import 'package:harmony/ui/components/play_pause_button.dart';
-import 'package:harmony/ui/screens/pitch_listen_screen.dart';
+import 'package:harmony/ui/screens/assist_mode_screen.dart';
 
 /// Main Shruti drone screen: Sa selection and play/pause.
 class HomeScreen extends StatefulWidget {
@@ -94,14 +95,18 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: DesignTokens.spaceMd),
               TextButton(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const PitchListenScreen(),
+                onPressed: () async {
+                  final pitch = await Navigator.of(context).push<Pitch>(
+                    MaterialPageRoute<Pitch>(
+                      builder: (_) => const AssistModeScreen(),
                     ),
                   );
+                  if (!mounted || pitch == null) {
+                    return;
+                  }
+                  await _controller.playPitch(pitch);
                 },
-                child: const Text('Detect pitch'),
+                child: const Text('Assist Mode'),
               ),
             ],
           ),
