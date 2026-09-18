@@ -6,7 +6,11 @@ import 'package:harmony/audio/audio_service.dart';
 
 /// [AudioService] backed by `just_audio` for looping tanpura sample playback.
 class JustAudioService implements AudioService {
-  JustAudioService({AudioPlayer? player}) : _player = player ?? AudioPlayer();
+  JustAudioService({
+    AudioPlayer? player,
+    bool handleInterruptions = true,
+  }) : _player =
+           player ?? AudioPlayer(handleInterruptions: handleInterruptions);
 
   final AudioPlayer _player;
   String? _currentAsset;

@@ -121,4 +121,33 @@ void main() {
     expect(controller.errorMessage, 'Failed to play the tanpura sample.');
     expect(controller.isPlaying, isFalse);
   });
+
+  test('playPitch selects the pitch and starts playback', () async {
+    await controller.initialize();
+    await controller.selectPitch(Pitch.d);
+    expect(controller.isPlaying, isFalse);
+
+    await controller.playPitch(Pitch.cSharp);
+
+    expect(controller.selectedPitch, Pitch.cSharp);
+    expect(controller.isPlaying, isTrue);
+    expect(audioService.isPlaying, isTrue);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.cSharp));
+  });
+
+  test(
+    'playPitch switches from a previous selection without a second tap',
+    () async {
+      await controller.initialize();
+      await controller.playPitch(Pitch.d);
+      final playCountAfterFirst = audioService.playCount;
+
+      await controller.playPitch(Pitch.fSharp);
+
+      expect(controller.selectedPitch, Pitch.fSharp);
+      expect(controller.isPlaying, isTrue);
+      expect(audioService.playCount, greaterThan(playCountAfterFirst));
+      expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.fSharp));
+    },
+  );
 }

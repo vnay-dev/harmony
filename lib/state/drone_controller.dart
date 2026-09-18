@@ -91,6 +91,42 @@ class DroneController extends ChangeNotifier {
     }
   }
 
+  /// Selects [pitch] and starts playback.
+  ///
+  /// Used when Assist Mode hands a confirmed Shruti to Default Mode so the
+  /// user does not need to tap Play again.
+  Future<void> playPitch(Pitch pitch) async {
+    if (_isBusy) {
+      return;
+    }
+
+    _isBusy = true;
+    _errorMessage = null;
+    _selectedPitch = pitch;
+    notifyListeners();
+
+    try {
+      final asset = AudioAssets.sampleFor(pitch);
+      if (asset == null) {
+        _errorMessage = 'No sample available for ${pitch.label} yet.';
+        _isPlaying = false;
+        return;
+      }
+      await _audioService.load(asset);
+      await _audioService.play();
+      _isPlaying = true;
+    } on AudioServiceException catch (error) {
+      _errorMessage = error.message;
+      _isPlaying = _audioService.isPlaying;
+    } catch (_) {
+      _errorMessage = 'Failed to play the tanpura sample.';
+      _isPlaying = _audioService.isPlaying;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
   /// Toggles between play and pause.
   Future<void> togglePlayback() async {
     if (_isBusy) {
