@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harmony/audio/audio_assets.dart';
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/pitch/frequency_to_note.dart';
+import 'package:harmony/pitch/nearest_supported_shruti.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/reference_pitch_adjuster.dart';
@@ -190,6 +191,45 @@ void main() {
     expect(controller.referenceFrequencyHz, isNot(closeTo(startHz, 0.5)));
     expect(controller.referencePitch, isNot(Pitch.c));
   });
+
+  test(
+    'first stable voice pitch seeds nearest Shruti instead of walking from C',
+    () async {
+      late final AssistModeController controller;
+      var listenCount = 0;
+      Pitch? pitchAfterFirstListen;
+      double? hzAfterFirstListen;
+
+      controller = buildController(
+        service: detectionService,
+        initialReferencePitch: Pitch.c,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening) {
+              listenCount += 1;
+              await emitHz(detectionService, 220);
+            }
+            if (phase == AssistUiPhase.showingTransition &&
+                pitchAfterFirstListen == null) {
+              pitchAfterFirstListen = controller.referencePitch;
+              hzAfterFirstListen = controller.referenceFrequencyHz;
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+
+      expect(pitchAfterFirstListen, Pitch.a);
+      expect(hzAfterFirstListen, closeTo(frequencyHzForPitch(Pitch.a), 0.5));
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.a);
+      // Converge + verify — no chromatic walk C→C#→…→A.
+      expect(listenCount, 2);
+    },
+  );
 
   test('within tolerance does not adjust and enters verification', () async {
     late final AssistModeController controller;
@@ -420,6 +460,7 @@ void main() {
       late final AssistModeController controller;
       final maxHz = frequencyHzForPitch(Pitch.b);
       final aboveMax = maxHz * math.pow(2, 150 / 1200).toDouble();
+      var listenCount = 0;
 
       controller = buildController(
         service: detectionService,
@@ -428,7 +469,14 @@ void main() {
           () => controller,
           onPhase: (phase) async {
             if (phase == AssistUiPhase.listening) {
-              await emitHz(detectionService, aboveMax);
+              listenCount += 1;
+              if (listenCount == 1) {
+                // Seed initial candidate at B, then enter verification.
+                await emitPitch(detectionService, Pitch.b);
+              } else {
+                // Verification: still far above the supported ceiling.
+                await emitHz(detectionService, aboveMax);
+              }
             }
           },
         ),
@@ -469,10 +517,7 @@ void main() {
       // Must converge on A — not retry via atBoundary-at-C from octave folding.
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.a);
-      expect(
-        controller.referenceFrequencyHz,
-        closeTo(aHz, 1.0),
-      );
+      expect(controller.referenceFrequencyHz, closeTo(aHz, 1.0));
     },
   );
 
@@ -579,7 +624,10 @@ void main() {
 
       expect(controller.uiPhase, isNot(AssistUiPhase.retry));
       expect(detectionService.stopCount, greaterThan(0));
-      expect(controller.referenceFrequencyHz, greaterThan(frequencyHzForPitch(Pitch.c)));
+      expect(
+        controller.referenceFrequencyHz,
+        greaterThan(frequencyHzForPitch(Pitch.c)),
+      );
     },
   );
 
@@ -625,8 +673,10 @@ void main() {
     'low detected F0 below C does not confirm default C as Shruti',
     () async {
       late final AssistModeController controller;
-      // Below C3: forces downward demand at the minimum bound.
+      // Below C3: octave-folds into the Sa band near A#/B — smart start must
+      // not leave the session stuck on the hardcoded default C.
       final belowC = frequencyHzForPitch(Pitch.c) * math.pow(2, -150 / 1200);
+      final expected = nearestSupportedShruti(belowC.toDouble());
 
       controller = buildController(
         service: detectionService,
@@ -644,8 +694,9 @@ void main() {
 
       await controller.startSession();
 
-      expect(controller.uiPhase, AssistUiPhase.retry);
-      expect(controller.referencePitch, Pitch.c);
+      expect(expected, isNotNull);
+      expect(controller.referencePitch, isNot(Pitch.c));
+      expect(controller.referencePitch, expected!.pitch);
     },
   );
 
@@ -763,6 +814,7 @@ void main() {
     final maxHz = frequencyHzForPitch(Pitch.b);
     final aboveMax = maxHz * math.pow(2, 150 / 1200).toDouble();
     final frequencies = <double>[];
+    var listenCount = 0;
 
     controller = buildController(
       service: detectionService,
@@ -771,7 +823,12 @@ void main() {
         () => controller,
         onPhase: (phase) async {
           if (phase == AssistUiPhase.listening) {
-            await emitHz(detectionService, aboveMax);
+            listenCount += 1;
+            if (listenCount == 1) {
+              await emitPitch(detectionService, Pitch.b);
+            } else {
+              await emitHz(detectionService, aboveMax);
+            }
             final hz = controller.referenceFrequencyHz;
             if (hz != null) {
               frequencies.add(hz);

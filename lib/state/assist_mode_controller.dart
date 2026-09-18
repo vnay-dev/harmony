@@ -7,6 +7,7 @@ import 'package:harmony/audio/audio_service.dart';
 import 'package:harmony/audio/audio_session_config.dart';
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/pitch/frequency_to_note.dart';
+import 'package:harmony/pitch/nearest_supported_shruti.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
@@ -62,6 +63,9 @@ class AssistModeController extends ChangeNotifier {
   bool _pitchAnalysisEnabled = false;
   bool _isDisposed = false;
   bool _isVerifying = false;
+
+  /// Whether the first stable voice pitch has seeded the initial Shruti candidate.
+  bool _didApplyInitialShrutiCandidate = false;
   String? _errorMessage;
 
   AssistUiPhase _uiPhase = AssistUiPhase.intro;
@@ -122,6 +126,7 @@ class AssistModeController extends ChangeNotifier {
     _clearListenCapture();
     _candidateFinder.reset();
     _pitchAdjuster.reset();
+    _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
     _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
     notifyListeners();
@@ -299,6 +304,8 @@ class AssistModeController extends ChangeNotifier {
       );
     }
 
+    _applyInitialShrutiCandidateIfNeeded(observation);
+
     final previousPitch = _referencePitch;
     final previousHz =
         _pitchAdjuster.referenceFrequencyHz ??
@@ -315,7 +322,9 @@ class AssistModeController extends ChangeNotifier {
       case ReferenceMatchKind.rejected:
         _setPhase(AssistUiPhase.retry);
         if (kDebugMode) {
-          debugPrint('AssistDiag CONTROLLER_FAILURE reason=observation_rejected');
+          debugPrint(
+            'AssistDiag CONTROLLER_FAILURE reason=observation_rejected',
+          );
           debugPrint('AssistDiag FINAL_RESULT kind=rejected');
         }
         notifyListeners();
@@ -424,6 +433,39 @@ class AssistModeController extends ChangeNotifier {
     if (nextPitch != null) {
       _referencePitch = nextPitch;
     }
+  }
+
+  /// Seeds the reference from the first stable voice pitch instead of walking
+  /// chromatically from the hardcoded session start (typically C).
+  ///
+  /// Does not confirm Shruti — only replaces the initial search candidate.
+  /// Subsequent observe / verify / adjust behavior is unchanged.
+  void _applyInitialShrutiCandidateIfNeeded(StablePitchCandidate observation) {
+    if (_didApplyInitialShrutiCandidate || _isVerifying) {
+      return;
+    }
+    _didApplyInitialShrutiCandidate = true;
+
+    final initial = nearestSupportedShruti(observation.frequencyHz);
+    if (initial == null) {
+      return;
+    }
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag detectedVoiceHz='
+        '${observation.frequencyHz.toStringAsFixed(1)}',
+      );
+      debugPrint('AssistDiag detectedVoiceNote=${observation.pitch.label}');
+      debugPrint('AssistDiag initialShrutiCandidate=${initial.pitch.label}');
+      debugPrint(
+        'AssistDiag initialShrutiCandidateHz='
+        '${initial.frequencyHz.toStringAsFixed(1)}',
+      );
+    }
+
+    _referencePitch = initial.pitch;
+    _pitchAdjuster.start(initial.frequencyHz);
   }
 
   bool _isActive(int generation) =>
@@ -679,6 +721,7 @@ class AssistModeController extends ChangeNotifier {
     _uiPhase = AssistUiPhase.intro;
     _currentRound = 0;
     _listenProgress = 0;
+    _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
     await _readingsSubscription?.cancel();
     _readingsSubscription = null;
