@@ -178,6 +178,58 @@ class AssistModeController extends ChangeNotifier {
     await _playAndListenRound(generation, incrementRound: false);
   }
 
+  /// Discards the confirmed Shruti and starts a fresh Assist search.
+  ///
+  /// Only valid from [AssistUiPhase.completed]. Stops confirmed playback,
+  /// clears Assist session state, and begins the normal finding flow again.
+  /// Does not change Default Mode's selected Shruti.
+  Future<void> tryAgain() async {
+    if (_isBusy || _isDisposed || _uiPhase != AssistUiPhase.completed) {
+      return;
+    }
+
+    _isBusy = true;
+    _errorMessage = null;
+    notifyListeners();
+
+    // Invalidate timers, waits, and listeners from the completed session so
+    // they cannot restore completion after this restart.
+    _sessionGeneration += 1;
+    await _resetToIntro();
+
+    // Bootstrap a new search the same way [startSession] does. Smart Shruti
+    // start remains available because [_didApplyInitialShrutiCandidate] was
+    // cleared in [_resetToIntro].
+    _isVerifying = false;
+    _currentRound = 0;
+    _listenProgress = 0;
+    _clearListenCapture();
+    _candidateFinder.reset();
+    _pitchAdjuster.reset();
+    _didApplyInitialShrutiCandidate = false;
+    _referencePitch = initialReferencePitch;
+    _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
+
+    final generation = ++_sessionGeneration;
+
+    try {
+      await _prepareAudioSession();
+      _isSessionActive = true;
+    } catch (_) {
+      _errorMessage = 'Failed to start Assist Mode.';
+      _isSessionActive = false;
+      _uiPhase = AssistUiPhase.intro;
+      return;
+    } finally {
+      _isBusy = false;
+      if (!_isDisposed) {
+        notifyListeners();
+      }
+    }
+
+    await _runRoundLoop(generation);
+  }
+
   Future<void> _runRoundLoop(int generation) async {
     while (!_isDisposed &&
         _isSessionActive &&

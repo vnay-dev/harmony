@@ -333,6 +333,15 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
               child: const Text('Play My Shruti'),
             ),
           ),
+          const SizedBox(height: DesignTokens.spaceMd),
+          SizedBox(
+            height: DesignTokens.controlHeight,
+            child: OutlinedButton(
+              key: const ValueKey<String>('assist-try-again'),
+              onPressed: busy ? null : _controller.tryAgain,
+              child: const Text('Try Again'),
+            ),
+          ),
         ];
     }
   }

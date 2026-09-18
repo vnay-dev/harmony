@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
@@ -900,5 +901,242 @@ void main() {
     await controller.startSession();
 
     expect(referenceWhileListening, Pitch.c);
+  });
+
+  test('tryAgain from completion resets Assist session state', () async {
+    late final AssistModeController controller;
+    var listenCount = 0;
+    var allowSecondSearch = false;
+
+    controller = buildController(
+      service: detectionService,
+      initialReferencePitch: Pitch.c,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening) {
+            listenCount += 1;
+            if (!allowSecondSearch) {
+              await emitPitch(detectionService, Pitch.e);
+            }
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.e);
+    expect(controller.isReferencePlaying, isTrue);
+    final listensBeforeRetry = listenCount;
+
+    allowSecondSearch = true;
+    final tryAgainFuture = controller.tryAgain();
+    // Let bootstrap finish; hold the new session on the first play window.
+    await Future<void>.delayed(Duration.zero);
+    await controller.stopSession();
+    await tryAgainFuture;
+
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(controller.isSessionActive, isFalse);
+    expect(controller.referencePitch, Pitch.c);
+    expect(controller.referenceFrequencyHz, isNull);
+    expect(controller.isVerifying, isFalse);
+    expect(controller.currentRound, 0);
+    expect(controller.isReferencePlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+    expect(listensBeforeRetry, greaterThan(0));
+  });
+
+  test('tryAgain starts a fresh listening session', () async {
+    late final AssistModeController controller;
+    var session = 0;
+    final phasesBySession = <int, List<AssistUiPhase>>{};
+
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          phasesBySession.putIfAbsent(session, () => <AssistUiPhase>[]);
+          phasesBySession[session]!.add(phase);
+          if (phase == AssistUiPhase.listening) {
+            await emitPitch(detectionService, Pitch.d);
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.d);
+
+    session = 1;
+    await controller.tryAgain();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(phasesBySession[1], isNotNull);
+    expect(phasesBySession[1], contains(AssistUiPhase.listening));
+    expect(phasesBySession[1], contains(AssistUiPhase.playingReference));
+  });
+
+  test(
+    'tryAgain clears previous confirmed Shruti from the new session',
+    () async {
+      late final AssistModeController controller;
+      var pass = 0;
+      Pitch? pitchWhileListeningAfterRetry;
+
+      controller = buildController(
+        service: detectionService,
+        initialReferencePitch: Pitch.c,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening) {
+              if (pass == 0) {
+                await emitPitch(detectionService, Pitch.g);
+              } else {
+                // Capture only the first listen of the restarted session, before
+                // smart-start / verification can update the reference.
+                pitchWhileListeningAfterRetry ??= controller.referencePitch;
+                await emitPitch(detectionService, Pitch.a);
+              }
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.referencePitch, Pitch.g);
+      expect(controller.uiPhase, AssistUiPhase.completed);
+
+      pass = 1;
+      await controller.tryAgain();
+
+      expect(pitchWhileListeningAfterRetry, Pitch.c);
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.a);
+    },
+  );
+
+  test('smart Shruti start still works after tryAgain', () async {
+    late final AssistModeController controller;
+    var pass = 0;
+    var listenCountPass1 = 0;
+
+    controller = buildController(
+      service: detectionService,
+      initialReferencePitch: Pitch.c,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening) {
+            if (pass == 0) {
+              await emitPitch(detectionService, Pitch.e);
+            } else {
+              listenCountPass1 += 1;
+              await emitHz(detectionService, 220);
+            }
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.referencePitch, Pitch.e);
+
+    pass = 1;
+    await controller.tryAgain();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+    expect(
+      controller.referenceFrequencyHz,
+      closeTo(frequencyHzForPitch(Pitch.a), 0.5),
+    );
+    // Converge + verify only — no chromatic walk from C after retry.
+    expect(listenCountPass1, 2);
+  });
+
+  test(
+    'stale wait from completed session cannot restore completion after tryAgain',
+    () async {
+      late final AssistModeController controller;
+      final pendingWaits = <Completer<void>>[];
+      var releaseWaits = true;
+
+      Future<void> enqueueWait(Duration duration) async {
+        final gate = Completer<void>();
+        pendingWaits.add(gate);
+        if (releaseWaits) {
+          gate.complete();
+        }
+        await gate.future;
+      }
+
+      controller = buildController(
+        service: detectionService,
+        wait: (duration) async {
+          final phase = controller.uiPhase;
+          if (phase == AssistUiPhase.listening) {
+            await emitPitch(detectionService, Pitch.f);
+          }
+          await enqueueWait(duration);
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.f);
+
+      // Hold new-session waits so we can complete an old gate after restart.
+      releaseWaits = false;
+      pendingWaits.clear();
+      final tryAgainFuture = controller.tryAgain();
+
+      // Allow tryAgain to tear down and begin the new round loop.
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.uiPhase, isNot(AssistUiPhase.completed));
+      expect(controller.referencePitch, isNot(Pitch.f));
+
+      // Completing any leftover gates must not resurrect the old completion.
+      for (final gate in List<Completer<void>>.from(pendingWaits)) {
+        if (!gate.isCompleted) {
+          gate.complete();
+        }
+      }
+
+      releaseWaits = true;
+      for (final gate in List<Completer<void>>.from(pendingWaits)) {
+        if (!gate.isCompleted) {
+          gate.complete();
+        }
+      }
+      await tryAgainFuture;
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.f);
+      expect(controller.isVerifying, isFalse);
+    },
+  );
+
+  test('tryAgain is ignored when not on the completion screen', () async {
+    final controller = buildController(
+      service: detectionService,
+      wait: (_) async {},
+    );
+    addTearDown(controller.dispose);
+
+    await controller.tryAgain();
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(controller.isSessionActive, isFalse);
   });
 }
