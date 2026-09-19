@@ -247,4 +247,19 @@ void main() {
     expect(matcher.isMatched, isFalse);
     expect(matcher.centsFromTarget!.abs(), greaterThan(50));
   });
+
+  test('foldOctaves false rejects same pitch class one octave above', () {
+    matcher.start(targetHz, foldOctaves: false); // D3
+    final d4 = targetHz * 2;
+
+    feed(d4, 20);
+    expect(matcher.isMatched, isFalse);
+  });
+
+  test('foldOctaves false still matches the literal target octave', () {
+    matcher.start(targetHz, foldOctaves: false);
+
+    feedUntilMatched(targetHz);
+    expect(matcher.state, TargetPitchMatchState.matched);
+  });
 }

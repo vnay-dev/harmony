@@ -16,10 +16,12 @@ import 'package:harmony/state/assist_mode_controller.dart';
 
 import '../support/fake_audio_service.dart';
 import '../support/fake_pitch_detection_service.dart';
+import '../support/fake_reference_sound_generator.dart';
 
 void main() {
   late FakePitchDetectionService detectionService;
   late FakeAudioService audioService;
+  late FakeReferenceSoundGenerator referenceSound;
 
   const fastTiming = AssistTimingConfig(
     referencePlayDuration: Duration(milliseconds: 1),
@@ -79,12 +81,36 @@ void main() {
     }
   }
 
-  /// Ends Stage 2 at the first comfort prompt so Stage 1 pitch is recommended.
+  /// Completes Stage 2 with a valid recommendation: first candidate Upper Sa
+  /// Comfortable, next candidate Upper Sa Strained → final = first.
+  ///
+  /// If the first candidate is already the top supported Shruti (B), Comfortable
+  /// alone completes the session.
   Future<void> finishStage2WithoutClimbing(
     AssistModeController controller,
   ) async {
-    while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
-      await controller.reportNotComfortable();
+    var markedFirstComfortable = false;
+    for (var i = 0; i < 64; i++) {
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.awaitingLowerAudibility) {
+        await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingUpperComfort) {
+        if (!markedFirstComfortable) {
+          markedFirstComfortable = true;
+          await controller.reportUpperSaComfortable();
+        } else {
+          await controller.reportUpperSaStrained();
+        }
+      } else if (phase == AssistUiPhase.rangeBoundaryReached) {
+        await controller.acknowledgeRangeBoundary();
+      } else if (phase == AssistUiPhase.completed ||
+          phase == AssistUiPhase.intro ||
+          phase == AssistUiPhase.retry ||
+          phase == AssistUiPhase.rangeUnresolved) {
+        return;
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
     }
   }
 
@@ -103,6 +129,7 @@ void main() {
       candidateFinder: buildFinder(),
       pitchAdjuster: pitchAdjuster,
       targetMatcher: targetMatcher ?? buildMatcher(),
+      referenceSoundGenerator: referenceSound,
       timing: timing,
       initialReferencePitch: initialReferencePitch,
       wait: wait,
@@ -118,9 +145,9 @@ void main() {
       final controller = controllerOf();
       final phase = controller.uiPhase;
       if (phase == AssistUiPhase.listening && controller.isExploringRange) {
-        final target = controller.currentExploreCandidate;
-        if (target != null) {
-          await emitPitch(detectionService, target);
+        final hz = controller.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
         }
       }
       if (onPhase != null) {
@@ -132,6 +159,7 @@ void main() {
   setUp(() {
     detectionService = FakePitchDetectionService();
     audioService = FakeAudioService();
+    referenceSound = FakeReferenceSoundGenerator();
   });
 
   test('intro is shown before a session begins', () {
@@ -263,7 +291,7 @@ void main() {
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.a);
       // Converge + verify — no chromatic walk C→C#→…→A.
-      expect(listenCount, 3); // Stage1 converge + verify + Stage2 match
+      expect(listenCount, 8); // Stage1×2 + first candidate×3 + next×3
     },
   );
 
@@ -318,7 +346,7 @@ void main() {
     await controller.startSession();
     await finishStage2WithoutClimbing(controller);
 
-    expect(listenCount, 3); // Stage1 converge + verify + Stage2 match
+    expect(listenCount, 8); // Stage1×2 + first candidate×3 + next×3
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.isVerifying, isFalse);
   });
@@ -768,7 +796,8 @@ void main() {
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening &&
+              !controller.isExploringRange) {
             listenCount += 1;
             final wobbleCents = listenCount.isEven ? 15.0 : -18.0;
             final hz = ref * math.pow(2, wobbleCents / 1200).toDouble();
@@ -784,7 +813,7 @@ void main() {
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.d);
-    expect(listenCount, 3);
+    expect(listenCount, 2);
   });
 
   test('silence never changes the reference and yields retry', () async {
@@ -1149,7 +1178,14 @@ void main() {
         wait: (duration) async {
           final phase = controller.uiPhase;
           if (phase == AssistUiPhase.listening) {
-            await emitPitch(detectionService, Pitch.f);
+            if (controller.isExploringRange) {
+              final hz = controller.currentRangeTargetHz;
+              if (hz != null) {
+                await emitHz(detectionService, hz);
+              }
+            } else {
+              await emitPitch(detectionService, Pitch.f);
+            }
           }
           await enqueueWait(duration);
         },
