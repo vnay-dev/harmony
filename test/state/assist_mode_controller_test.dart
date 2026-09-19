@@ -11,6 +11,7 @@ import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
+import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 
 import '../support/fake_audio_service.dart';
@@ -30,6 +31,18 @@ void main() {
   StablePitchCandidateFinder buildFinder() {
     return StablePitchCandidateFinder(
       minStableSamples: 4,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+  }
+
+  TargetPitchMatcher buildMatcher() {
+    return TargetPitchMatcher(
+      toleranceCents: 50,
+      samplesToMatch: 4,
+      samplesToLoseMatch: 2,
       stabilityTracker: PitchStabilityTracker(
         samplesToBecomeStable: 3,
         mismatchesToBecomeUnstable: 2,
@@ -66,12 +79,22 @@ void main() {
     }
   }
 
+  /// Ends Stage 2 at the first comfort prompt so Stage 1 pitch is recommended.
+  Future<void> finishStage2WithoutClimbing(
+    AssistModeController controller,
+  ) async {
+    while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
+      await controller.reportNotComfortable();
+    }
+  }
+
   AssistModeController buildController({
     required FakePitchDetectionService service,
     required Future<void> Function(Duration duration) wait,
     FakeAudioService? audio,
     AssistTimingConfig timing = fastTiming,
     ReferencePitchAdjuster? pitchAdjuster,
+    TargetPitchMatcher? targetMatcher,
     Pitch initialReferencePitch = Pitch.c,
   }) {
     return AssistModeController(
@@ -79,6 +102,7 @@ void main() {
       audioService: audio ?? audioService,
       candidateFinder: buildFinder(),
       pitchAdjuster: pitchAdjuster,
+      targetMatcher: targetMatcher ?? buildMatcher(),
       timing: timing,
       initialReferencePitch: initialReferencePitch,
       wait: wait,
@@ -91,7 +115,14 @@ void main() {
     Future<void> Function(AssistUiPhase phase)? onPhase,
   }) {
     return (duration) async {
-      final phase = controllerOf().uiPhase;
+      final controller = controllerOf();
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.listening && controller.isExploringRange) {
+        final target = controller.currentExploreCandidate;
+        if (target != null) {
+          await emitPitch(detectionService, target);
+        }
+      }
       if (onPhase != null) {
         await onPhase(phase);
       }
@@ -136,6 +167,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(analysisDuringPlay, isFalse);
     expect(micListeningDuringPlay, isFalse);
@@ -165,6 +197,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(playingDuringSettle, isFalse);
     expect(playingDuringListen, isFalse);
@@ -188,6 +221,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.referenceFrequencyHz, isNot(closeTo(startHz, 0.5)));
     expect(controller.referencePitch, isNot(Pitch.c));
@@ -222,13 +256,14 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       expect(pitchAfterFirstListen, Pitch.a);
       expect(hzAfterFirstListen, closeTo(frequencyHzForPitch(Pitch.a), 0.5));
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.a);
       // Converge + verify — no chromatic walk C→C#→…→A.
-      expect(listenCount, 2);
+      expect(listenCount, 3); // Stage1 converge + verify + Stage2 match
     },
   );
 
@@ -254,6 +289,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(sawVerifying, isTrue);
     expect(controller.uiPhase, AssistUiPhase.completed);
@@ -280,8 +316,9 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
-    expect(listenCount, 2); // adjust/converge listen + verify listen
+    expect(listenCount, 3); // Stage1 converge + verify + Stage2 match
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.isVerifying, isFalse);
   });
@@ -304,6 +341,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.d);
@@ -351,6 +389,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(sawAdjustAfterVerify, isTrue);
     expect(controller.uiPhase, AssistUiPhase.completed);
@@ -378,6 +417,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.e);
@@ -402,6 +442,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.c);
@@ -424,6 +465,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.cSharp);
@@ -446,6 +488,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.e);
@@ -485,6 +528,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       // Far from user at the range edge must not be treated as "found Shruti".
       expect(controller.uiPhase, AssistUiPhase.retry);
@@ -514,6 +558,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       // Must converge on A — not retry via atBoundary-at-C from octave folding.
       expect(controller.uiPhase, AssistUiPhase.completed);
@@ -542,6 +587,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(phases, contains(AssistUiPhase.listening));
     expect(controller.uiPhase, AssistUiPhase.completed);
@@ -571,6 +617,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.e);
@@ -594,6 +641,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
     expect(controller.referencePitch, Pitch.c);
@@ -622,6 +670,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       expect(controller.uiPhase, isNot(AssistUiPhase.retry));
       expect(detectionService.stopCount, greaterThan(0));
@@ -660,6 +709,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       expect(pitchAfterFirstAdjust, isNotNull);
       expect(pitchAfterFirstAdjust, isNot(Pitch.c));
@@ -694,6 +744,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
 
       expect(expected, isNotNull);
       expect(controller.referencePitch, isNot(Pitch.c));
@@ -729,10 +780,11 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.d);
-    expect(listenCount, 2);
+    expect(listenCount, 3);
   });
 
   test('silence never changes the reference and yields retry', () async {
@@ -753,6 +805,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
     expect(controller.referencePitch, Pitch.c);
@@ -781,6 +834,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
     expect(controller.referencePitch, Pitch.c);
@@ -805,6 +859,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
     expect(controller.referencePitch, Pitch.c);
@@ -841,6 +896,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
     expect(controller.referenceFrequencyHz, closeTo(maxHz, 0.01));
@@ -870,6 +926,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.intro);
     expect(controller.isSessionActive, isFalse);
@@ -899,6 +956,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
     expect(referenceWhileListening, Pitch.c);
   });
@@ -926,6 +984,7 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.e);
     expect(controller.isReferencePlaying, isTrue);
@@ -970,11 +1029,13 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.d);
 
     session = 1;
     await controller.tryAgain();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(phasesBySession[1], isNotNull);
@@ -1011,11 +1072,13 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
       expect(controller.referencePitch, Pitch.g);
       expect(controller.uiPhase, AssistUiPhase.completed);
 
       pass = 1;
       await controller.tryAgain();
+      await finishStage2WithoutClimbing(controller);
 
       expect(pitchWhileListeningAfterRetry, Pitch.c);
       expect(controller.uiPhase, AssistUiPhase.completed);
@@ -1037,7 +1100,7 @@ void main() {
           if (phase == AssistUiPhase.listening) {
             if (pass == 0) {
               await emitPitch(detectionService, Pitch.e);
-            } else {
+            } else if (!controller.isExploringRange) {
               listenCountPass1 += 1;
               await emitHz(detectionService, 220);
             }
@@ -1048,10 +1111,12 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
     expect(controller.referencePitch, Pitch.e);
 
     pass = 1;
     await controller.tryAgain();
+    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.a);
@@ -1059,7 +1124,7 @@ void main() {
       controller.referenceFrequencyHz,
       closeTo(frequencyHzForPitch(Pitch.a), 0.5),
     );
-    // Converge + verify only — no chromatic walk from C after retry.
+    // Stage1 converge + verify for A after retry — no chromatic walk from C.
     expect(listenCountPass1, 2);
   });
 
@@ -1092,6 +1157,7 @@ void main() {
       addTearDown(controller.dispose);
 
       await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.f);
 
@@ -1121,6 +1187,7 @@ void main() {
         }
       }
       await tryAgainFuture;
+      await finishStage2WithoutClimbing(controller);
 
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.f);

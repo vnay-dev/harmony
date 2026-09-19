@@ -11,23 +11,24 @@ import 'package:harmony/pitch/nearest_supported_shruti.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
+import 'package:harmony/pitch/supported_shruti_steps.dart';
+import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_phase.dart';
 
 export 'package:harmony/state/assist_mode_phase.dart';
 
-/// Orchestrates Assist Mode V2 as discrete Listen → Sing → Adjust rounds.
+/// Orchestrates Assist Mode as Stage 1 (find starting Shruti) then Stage 2
+/// (explore comfortable upward range).
 ///
 /// Tanpura playback and pitch analysis never overlap. Analysis runs only in
 /// [AssistUiPhase.listening], after playback has stopped and settled.
-///
-/// Completion requires an explicit cents-based convergence check and a
-/// successful verification listen — not a round counter.
 class AssistModeController extends ChangeNotifier {
   AssistModeController({
     required PitchDetectionService detectionService,
     required AudioService audioService,
     StablePitchCandidateFinder? candidateFinder,
     ReferencePitchAdjuster? pitchAdjuster,
+    TargetPitchMatcher? targetMatcher,
     this.timing = const AssistTimingConfig(),
     this.initialReferencePitch = Pitch.defaultPitch,
     Future<void> Function(Duration duration)? wait,
@@ -36,6 +37,7 @@ class AssistModeController extends ChangeNotifier {
        _audioService = audioService,
        _candidateFinder = candidateFinder ?? StablePitchCandidateFinder(),
        _pitchAdjuster = pitchAdjuster ?? ReferencePitchAdjuster(),
+       _targetMatcher = targetMatcher ?? TargetPitchMatcher(),
        _wait = wait,
        _prepareAudioSession =
            prepareAudioSession ?? ensurePlayAndRecordAudioSession;
@@ -43,13 +45,14 @@ class AssistModeController extends ChangeNotifier {
   /// Durations for play / settle / listen / transition.
   final AssistTimingConfig timing;
 
-  /// Starting Sa pitch class for round 1.
+  /// Starting Sa pitch class for Stage 1 round 1.
   final Pitch initialReferencePitch;
 
   final PitchDetectionService _detectionService;
   final AudioService _audioService;
   final StablePitchCandidateFinder _candidateFinder;
   final ReferencePitchAdjuster _pitchAdjuster;
+  final TargetPitchMatcher _targetMatcher;
   final Future<void> Function(Duration duration)? _wait;
   final Future<void> Function() _prepareAudioSession;
 
@@ -69,13 +72,27 @@ class AssistModeController extends ChangeNotifier {
   String? _errorMessage;
 
   AssistUiPhase _uiPhase = AssistUiPhase.intro;
+  AssistStage _stage = AssistStage.findingStart;
   int _currentRound = 0;
   Pitch _referencePitch = Pitch.defaultPitch;
   double _listenProgress = 0;
 
-  /// Latched successful capture for the current listen window.
-  ///
-  /// Once set, timeout/failure paths must not overwrite it.
+  /// Stage 1 result locked when verification succeeds.
+  Pitch? _stage1Shruti;
+
+  /// Last Stage 2 note the user matched and marked comfortable.
+  Pitch? _lastComfortableShruti;
+
+  /// Current Stage 2 Tanpura target being tested.
+  Pitch? _currentExploreCandidate;
+
+  /// True after a Stage 2 listen latched a TargetPitchMatcher match.
+  bool _exploreMatchAccepted = false;
+
+  /// UI: transition copy after a comfortable step-up.
+  bool _exploreStepUpPending = false;
+
+  /// Latched successful capture for the current Stage 1 listen window.
   StablePitchCandidate? _acceptedListenCandidate;
   bool _listenCaptureResolved = false;
 
@@ -86,17 +103,40 @@ class AssistModeController extends ChangeNotifier {
   /// Current UI phase.
   AssistUiPhase get uiPhase => _uiPhase;
 
+  /// Whether Stage 2 range exploration is active.
+  AssistStage get stage => _stage;
+
+  bool get isExploringRange => _stage == AssistStage.exploringRange;
+
+  /// True while showing the post-match comfort prompt.
+  bool get isAwaitingComfort => _uiPhase == AssistUiPhase.awaitingComfort;
+
+  /// True when the transition should say "one step higher".
+  bool get isExploreStepUpPending => _exploreStepUpPending;
+
+  /// True when Stage 2 has latched a successful match for the current candidate.
+  bool get didMatchCurrentExploreTarget => _exploreMatchAccepted;
+
   /// 1-based round number while a session is active.
   int get currentRound => _currentRound;
 
   /// Progress through the listening window, from `0` to `1`.
   double get listenProgress => _listenProgress;
 
-  /// Current reference Sa pitch class.
+  /// Current reference / explore Sa pitch class.
   Pitch get referencePitch => _referencePitch;
 
   /// Current reference frequency from the adjuster, if started.
   double? get referenceFrequencyHz => _pitchAdjuster.referenceFrequencyHz;
+
+  /// Stage 1 confirmed starting Shruti, if Stage 2 has begun.
+  Pitch? get stage1Shruti => _stage1Shruti;
+
+  /// Last comfortable Stage 2 note, if any.
+  Pitch? get lastComfortableShruti => _lastComfortableShruti;
+
+  /// Current Stage 2 candidate under test.
+  Pitch? get currentExploreCandidate => _currentExploreCandidate;
 
   /// True while confirming a converged candidate with another listen cycle.
   bool get isVerifying => _isVerifying;
@@ -126,6 +166,7 @@ class AssistModeController extends ChangeNotifier {
     _clearListenCapture();
     _candidateFinder.reset();
     _pitchAdjuster.reset();
+    _clearStage2State();
     _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
     _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
@@ -206,6 +247,7 @@ class AssistModeController extends ChangeNotifier {
     _clearListenCapture();
     _candidateFinder.reset();
     _pitchAdjuster.reset();
+    _clearStage2State();
     _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
     _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
@@ -234,17 +276,74 @@ class AssistModeController extends ChangeNotifier {
     while (!_isDisposed &&
         _isSessionActive &&
         generation == _sessionGeneration &&
-        _uiPhase != AssistUiPhase.completed) {
+        _uiPhase != AssistUiPhase.completed &&
+        _uiPhase != AssistUiPhase.awaitingComfort) {
       final finished = await _playAndListenRound(generation);
       if (!finished) {
         return;
       }
       if (_uiPhase == AssistUiPhase.completed ||
           _uiPhase == AssistUiPhase.retry ||
-          _uiPhase == AssistUiPhase.intro) {
+          _uiPhase == AssistUiPhase.intro ||
+          _uiPhase == AssistUiPhase.awaitingComfort ||
+          _stage == AssistStage.exploringRange) {
         return;
       }
     }
+  }
+
+  /// User confirmed the matched Stage 2 note feels comfortable.
+  Future<void> reportComfortable() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.awaitingComfort ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    final current = _currentExploreCandidate;
+    final stage1 = _stage1Shruti;
+    if (current == null || stage1 == null) {
+      return;
+    }
+
+    final generation = _sessionGeneration;
+    _lastComfortableShruti = current;
+
+    final next = nextHigherSupportedShruti(current);
+    if (next == null) {
+      await _completeWithRecommendation(current);
+      return;
+    }
+
+    // Do not advance the candidate until this note was matched + comfortable.
+    _currentExploreCandidate = next;
+    _referencePitch = next;
+    _exploreStepUpPending = true;
+    _setPhase(AssistUiPhase.showingTransition);
+    await _awaitPhase(timing.transitionDuration, generation);
+    if (!_isActive(generation)) {
+      return;
+    }
+    _exploreStepUpPending = false;
+
+    await _runExploreLoop(generation);
+  }
+
+  /// User reported the matched Stage 2 note is not comfortable.
+  Future<void> reportNotComfortable() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.awaitingComfort ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    final recommended = _lastComfortableShruti ?? _stage1Shruti;
+    if (recommended == null) {
+      return;
+    }
+    await _completeWithRecommendation(recommended);
   }
 
   /// Runs one full play → settle → listen → process cycle.
@@ -434,7 +533,7 @@ class AssistModeController extends ChangeNotifier {
     }
   }
 
-  /// Close enough (or clamped at range edge): verify once, then complete.
+  /// Close enough (or clamped at range edge): verify once, then enter Stage 2.
   Future<bool> _handleConverged(
     int generation,
     ReferencePitchAdjustment adjustment,
@@ -444,27 +543,14 @@ class AssistModeController extends ChangeNotifier {
     if (_isVerifying) {
       if (kDebugMode) {
         debugPrint(
-          'AssistDiag COMPLETE confirmedShruti=${_referencePitch.label} '
-          'confirmedHz='
-          '${_pitchAdjuster.referenceFrequencyHz?.toStringAsFixed(1) ?? "?"} '
-          'source=AssistModeController._referencePitch '
-          '(synced from ReferencePitchAdjuster.referenceFrequencyHz)',
+          'AssistDiag STAGE1_CONFIRMED startingShruti=${_referencePitch.label} '
+          '→ entering Stage 2 range exploration',
         );
       }
       _isVerifying = false;
       _stopListenProgress();
       _closeWindow();
-      _setPhase(AssistUiPhase.completed);
-      // Keep the confirmed Shruti audible on the completion screen.
-      try {
-        await _playReferenceForPitch(_referencePitch);
-      } on AudioServiceException catch (error) {
-        _errorMessage = error.message;
-      } catch (_) {
-        _errorMessage = 'Failed to play the tanpura sample.';
-      }
-      notifyListeners();
-      return true;
+      return _beginStage2(generation);
     }
 
     if (kDebugMode) {
@@ -478,6 +564,194 @@ class AssistModeController extends ChangeNotifier {
     _setPhase(AssistUiPhase.showingTransition);
     await _awaitPhase(timing.transitionDuration, generation);
     return _isActive(generation);
+  }
+
+  /// Locks Stage 1 result and begins upward comfort-range exploration.
+  Future<bool> _beginStage2(int generation) async {
+    _stage = AssistStage.exploringRange;
+    _stage1Shruti = _referencePitch;
+    _lastComfortableShruti = null;
+    _currentExploreCandidate = _referencePitch;
+    _exploreMatchAccepted = false;
+    _exploreStepUpPending = false;
+    _targetMatcher.stop();
+
+    _setPhase(AssistUiPhase.startingPointFound);
+    await _awaitPhase(timing.transitionDuration, generation);
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    _setPhase(AssistUiPhase.showingTransition);
+    await _awaitPhase(timing.transitionDuration, generation);
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    return _runExploreLoop(generation);
+  }
+
+  Future<bool> _runExploreLoop(int generation) async {
+    while (_isActive(generation) &&
+        _stage == AssistStage.exploringRange &&
+        _uiPhase != AssistUiPhase.completed &&
+        _uiPhase != AssistUiPhase.awaitingComfort) {
+      final finished = await _playAndMatchExploreRound(generation);
+      if (!finished) {
+        return false;
+      }
+      if (_uiPhase == AssistUiPhase.completed ||
+          _uiPhase == AssistUiPhase.awaitingComfort ||
+          _uiPhase == AssistUiPhase.intro) {
+        return true;
+      }
+    }
+    return _isActive(generation);
+  }
+
+  /// Stage 2: play target → settle → listen for a TargetPitchMatcher match.
+  Future<bool> _playAndMatchExploreRound(int generation) async {
+    final candidate = _currentExploreCandidate;
+    if (candidate == null) {
+      return false;
+    }
+
+    _currentRound += 1;
+    _listenProgress = 0;
+    _referencePitch = candidate;
+    _exploreMatchAccepted = false;
+
+    // 1) PLAY — tanpura on, analysis off.
+    _setPhase(AssistUiPhase.playingReference);
+    _disablePitchAnalysis();
+    await _safeStopDetection();
+    try {
+      await _playReferenceForPitch(candidate);
+    } on AudioServiceException catch (error) {
+      _errorMessage = error.message;
+      await _resetToIntro();
+      notifyListeners();
+      return false;
+    }
+
+    await _awaitPhase(timing.referencePlayDuration, generation);
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    // 2) STOP + settle — analysis still off.
+    _setPhase(AssistUiPhase.preparingToListen);
+    await _safePauseAudio();
+    _disablePitchAnalysis();
+    await _safeStopDetection();
+
+    await _awaitPhase(timing.settlingDuration, generation);
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    // 3) LISTEN — match against the fixed Tanpura target only.
+    _targetMatcher.start(frequencyHzForPitch(candidate));
+    _clearListenCapture();
+    _exploreMatchAccepted = false;
+    _rawF0LogCounter = 0;
+    _setPhase(AssistUiPhase.listening);
+    try {
+      await _startPitchAnalysis();
+    } on PitchDetectionException catch (error) {
+      _errorMessage = error.message;
+      _targetMatcher.stop();
+      await _completeWithRecommendation(
+        _lastComfortableShruti ?? _stage1Shruti ?? candidate,
+      );
+      return true;
+    } catch (_) {
+      _errorMessage = 'Failed to start listening.';
+      _targetMatcher.stop();
+      await _completeWithRecommendation(
+        _lastComfortableShruti ?? _stage1Shruti ?? candidate,
+      );
+      return true;
+    }
+
+    _startListenProgress(generation);
+    await _awaitPhase(timing.listenDuration, generation);
+    _stopListenProgress();
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    if (_uiPhase == AssistUiPhase.listening) {
+      _setPhase(AssistUiPhase.processing);
+    }
+    _disablePitchAnalysis();
+    _logListeningStop(
+      reason: _exploreMatchAccepted ? 'target_matched' : 'listen_window_ended',
+    );
+    await _readingsSubscription?.cancel();
+    _readingsSubscription = null;
+    await _safeStopDetection();
+
+    final matched = _exploreMatchAccepted || _targetMatcher.isMatched;
+    _targetMatcher.stop();
+
+    if (!matched) {
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag STAGE2_NO_MATCH target=${candidate.label} '
+          '→ recommend=${(_lastComfortableShruti ?? _stage1Shruti)?.label}',
+        );
+      }
+      await _completeWithRecommendation(
+        _lastComfortableShruti ?? _stage1Shruti ?? candidate,
+      );
+      return true;
+    }
+
+    // Match confirmed — do not advance until comfort is reported.
+    if (kDebugMode) {
+      debugPrint('AssistDiag STAGE2_MATCHED target=${candidate.label}');
+    }
+    _setPhase(AssistUiPhase.awaitingComfort);
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> _completeWithRecommendation(Pitch recommended) async {
+    _referencePitch = recommended;
+    _exploreStepUpPending = false;
+    _stopListenProgress();
+    _closeWindow();
+    _disablePitchAnalysis();
+    _targetMatcher.stop();
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag COMPLETE recommendedShruti=${recommended.label} '
+        'stage1=${_stage1Shruti?.label} '
+        'lastComfortable=${_lastComfortableShruti?.label}',
+      );
+    }
+
+    _setPhase(AssistUiPhase.completed);
+    try {
+      await _playReferenceForPitch(recommended);
+    } on AudioServiceException catch (error) {
+      _errorMessage = error.message;
+    } catch (_) {
+      _errorMessage = 'Failed to play the tanpura sample.';
+    }
+    notifyListeners();
+  }
+
+  void _clearStage2State() {
+    _stage = AssistStage.findingStart;
+    _stage1Shruti = null;
+    _lastComfortableShruti = null;
+    _currentExploreCandidate = null;
+    _exploreMatchAccepted = false;
+    _exploreStepUpPending = false;
+    _targetMatcher.stop();
   }
 
   void _syncReferencePitch(double referenceHz) {
@@ -639,7 +913,7 @@ class AssistModeController extends ChangeNotifier {
     if (!_pitchAnalysisEnabled || _uiPhase != AssistUiPhase.listening) {
       return;
     }
-    if (_listenCaptureResolved && _acceptedListenCandidate != null) {
+    if (_listenCaptureResolved) {
       return;
     }
     if (kDebugMode && reading.hasPitch && reading.frequencyHz != null) {
@@ -650,10 +924,20 @@ class AssistModeController extends ChangeNotifier {
         debugPrint(
           'AssistDiag rawF0=${hz.toStringAsFixed(1)}Hz '
           'note=${note?.label ?? "?"} '
-          'ref=${_referencePitch.label}',
+          'ref=${_referencePitch.label} '
+          'stage=${_stage.name}',
         );
       }
     }
+
+    if (_stage == AssistStage.exploringRange) {
+      _targetMatcher.add(reading);
+      if (_targetMatcher.isMatched) {
+        _tryAcceptExploreMatch(source: 'mid_listen');
+      }
+      return;
+    }
+
     _candidateFinder.add(reading);
     if (_candidateFinder.hasCandidate) {
       final candidate = _candidateFinder.result();
@@ -661,6 +945,34 @@ class AssistModeController extends ChangeNotifier {
         _tryAcceptListenCandidate(candidate, source: 'mid_listen');
       }
     }
+  }
+
+  /// Latches a Stage 2 target match and ends the listen window early.
+  bool _tryAcceptExploreMatch({required String source}) {
+    if (_listenCaptureResolved || _exploreMatchAccepted) {
+      return false;
+    }
+    if (_uiPhase != AssistUiPhase.listening &&
+        _uiPhase != AssistUiPhase.processing) {
+      return false;
+    }
+
+    _listenCaptureResolved = true;
+    _exploreMatchAccepted = true;
+    _disablePitchAnalysis();
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag STAGE2_MATCH_LATCH target='
+        '${_currentExploreCandidate?.label} source=$source',
+      );
+    }
+
+    if (_uiPhase == AssistUiPhase.listening) {
+      _setPhase(AssistUiPhase.processing);
+    }
+    _closeWindow();
+    return true;
   }
 
   void _logCycleDecision({
@@ -770,6 +1082,7 @@ class AssistModeController extends ChangeNotifier {
     _isSessionActive = false;
     _isVerifying = false;
     _clearListenCapture();
+    _clearStage2State();
     _uiPhase = AssistUiPhase.intro;
     _currentRound = 0;
     _listenProgress = 0;

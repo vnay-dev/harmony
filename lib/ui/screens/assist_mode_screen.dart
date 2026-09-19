@@ -7,10 +7,11 @@ import 'package:harmony/pitch/mic_pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
+import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
 
-/// Assist Mode V2: discrete Listen → Sing → Adjust rounds.
+/// Assist Mode: Stage 1 find starting Shruti, Stage 2 explore comfort range.
 class AssistModeScreen extends StatefulWidget {
   const AssistModeScreen({
     super.key,
@@ -18,6 +19,7 @@ class AssistModeScreen extends StatefulWidget {
     AudioService? audioService,
     StablePitchCandidateFinder? candidateFinder,
     ReferencePitchAdjuster? pitchAdjuster,
+    TargetPitchMatcher? targetMatcher,
     AssistModeController? controller,
     this.timing,
     this.initialReferencePitch,
@@ -27,12 +29,14 @@ class AssistModeScreen extends StatefulWidget {
        _audioService = audioService,
        _candidateFinder = candidateFinder,
        _pitchAdjuster = pitchAdjuster,
+       _targetMatcher = targetMatcher,
        _controller = controller;
 
   final PitchDetectionService? _detectionService;
   final AudioService? _audioService;
   final StablePitchCandidateFinder? _candidateFinder;
   final ReferencePitchAdjuster? _pitchAdjuster;
+  final TargetPitchMatcher? _targetMatcher;
   final AssistModeController? _controller;
 
   /// Optional timing overrides (tests / tuning).
@@ -71,6 +75,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
             JustAudioService(handleInterruptions: false),
         candidateFinder: widget._candidateFinder,
         pitchAdjuster: widget._pitchAdjuster,
+        targetMatcher: widget._targetMatcher,
         timing: widget.timing ?? const AssistTimingConfig(),
         initialReferencePitch:
             widget.initialReferencePitch ?? Pitch.defaultPitch,
@@ -97,16 +102,40 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     super.dispose();
   }
 
+  /// Prominent Shruti for Stage 1 result, Stage 2 testing, or completion.
+  Pitch? get _prominentShruti {
+    final phase = _controller.uiPhase;
+    if (phase == AssistUiPhase.intro || phase == AssistUiPhase.retry) {
+      return null;
+    }
+    if (phase == AssistUiPhase.startingPointFound) {
+      return _controller.stage1Shruti ?? _controller.referencePitch;
+    }
+    if (phase == AssistUiPhase.completed) {
+      return _controller.referencePitch;
+    }
+    if (_controller.isExploringRange) {
+      return _controller.currentExploreCandidate ?? _controller.referencePitch;
+    }
+    return null;
+  }
+
+  bool get _showProminentShruti => _prominentShruti != null;
+
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
     final errorMessage = _controller.errorMessage;
     final uiPhase = _controller.uiPhase;
+    final prominent = _prominentShruti;
     final showRound =
         _controller.isSessionActive &&
+        !_controller.isExploringRange &&
         uiPhase != AssistUiPhase.intro &&
-        uiPhase != AssistUiPhase.completed;
+        uiPhase != AssistUiPhase.completed &&
+        uiPhase != AssistUiPhase.startingPointFound &&
+        uiPhase != AssistUiPhase.awaitingComfort;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Assist Mode')),
@@ -137,28 +166,36 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                 const SizedBox(height: DesignTokens.spaceLg),
               ],
               const Spacer(),
+              if (_showProminentShruti && prominent != null) ...[
+                Text(
+                  prominent.label,
+                  key: ValueKey<String>(
+                    uiPhase == AssistUiPhase.completed
+                        ? 'assist-confirmed-shruti'
+                        : 'assist-prominent-shruti',
+                  ),
+                  style: textTheme.displaySmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: DesignTokens.spaceLg),
+              ],
               Text(
-                _headline(uiPhase),
+                _actionCue(uiPhase, prominent),
                 key: ValueKey<String>('assist-headline-$uiPhase'),
                 style: textTheme.titleLarge,
                 textAlign: TextAlign.center,
               ),
-              if (uiPhase == AssistUiPhase.completed) ...[
-                const SizedBox(height: DesignTokens.spaceLg),
+              if (_supportText(uiPhase) != null) ...[
+                const SizedBox(height: DesignTokens.spaceMd),
                 Text(
-                  _controller.referencePitch.label,
-                  key: const ValueKey<String>('assist-confirmed-shruti'),
-                  style: textTheme.displaySmall,
+                  _supportText(uiPhase)!,
+                  key: ValueKey<String>('assist-support-$uiPhase'),
+                  style: textTheme.bodyLarge?.copyWith(
+                    color: colorScheme.onSurface.withValues(alpha: 0.72),
+                  ),
                   textAlign: TextAlign.center,
                 ),
               ],
-              const SizedBox(height: DesignTokens.spaceMd),
-              Text(
-                _supportText(uiPhase),
-                key: ValueKey<String>('assist-support-$uiPhase'),
-                style: textTheme.bodyLarge,
-                textAlign: TextAlign.center,
-              ),
               if (uiPhase == AssistUiPhase.intro) ...[
                 const SizedBox(height: DesignTokens.spaceMd),
                 Text(
@@ -174,6 +211,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                 _ListenProgress(
                   progress: _controller.listenProgress,
                   colorScheme: colorScheme,
+                  showSingHint: !_controller.isExploringRange,
                 ),
               ],
               if (errorMessage != null) ...[
@@ -214,12 +252,48 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       case AssistUiPhase.retry:
         return 'Let\'s try this round again';
       case AssistUiPhase.intro:
+      case AssistUiPhase.startingPointFound:
+      case AssistUiPhase.awaitingComfort:
       case AssistUiPhase.completed:
         return '';
     }
   }
 
-  String _headline(AssistUiPhase phase) {
+  /// Primary instruction: what the user should do right now.
+  String _actionCue(AssistUiPhase phase, Pitch? prominent) {
+    final label = prominent?.label;
+
+    if (_controller.isExploringRange ||
+        phase == AssistUiPhase.startingPointFound ||
+        phase == AssistUiPhase.completed) {
+      switch (phase) {
+        case AssistUiPhase.startingPointFound:
+          return 'We found your match';
+        case AssistUiPhase.showingTransition:
+          return _controller.isExploreStepUpPending
+              ? 'Great. Let\'s try one step higher.'
+              : 'Now let\'s find your comfortable Shruti';
+        case AssistUiPhase.playingReference:
+          return 'Listen';
+        case AssistUiPhase.preparingToListen:
+          return 'Get ready';
+        case AssistUiPhase.listening:
+          return 'Sing and hold';
+        case AssistUiPhase.processing:
+          return _controller.didMatchCurrentExploreTarget
+              ? 'Got it'
+              : 'Checking…';
+        case AssistUiPhase.awaitingComfort:
+          return label == null ? 'How does that feel?' : 'How does $label feel?';
+        case AssistUiPhase.completed:
+          return 'Your comfortable Shruti';
+        case AssistUiPhase.intro:
+        case AssistUiPhase.verifying:
+        case AssistUiPhase.retry:
+          break;
+      }
+    }
+
     switch (phase) {
       case AssistUiPhase.intro:
         return 'Find your Shruti';
@@ -234,17 +308,44 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
             ? 'Sing your comfortable note again.'
             : 'Now, sing comfortably and hold your note.';
       case AssistUiPhase.processing:
-        return 'Lovely. Take a moment to listen.';
       case AssistUiPhase.showingTransition:
         return 'Lovely. Take a moment to listen.';
       case AssistUiPhase.retry:
         return "I couldn't catch a steady note";
+      case AssistUiPhase.startingPointFound:
+        return 'We found your match';
+      case AssistUiPhase.awaitingComfort:
+        return label == null ? 'How does that feel?' : 'How does $label feel?';
       case AssistUiPhase.completed:
-        return 'We found your comfortable Shruti';
+        return 'Your comfortable Shruti';
     }
   }
 
-  String _supportText(AssistUiPhase phase) {
+  String? _supportText(AssistUiPhase phase) {
+    if (_controller.isExploringRange ||
+        phase == AssistUiPhase.startingPointFound) {
+      switch (phase) {
+        case AssistUiPhase.startingPointFound:
+          return 'Now let\'s find your comfortable Shruti';
+        case AssistUiPhase.showingTransition:
+          return _controller.isExploreStepUpPending
+              ? 'Next, listen and sing along.'
+              : null;
+        case AssistUiPhase.playingReference:
+        case AssistUiPhase.preparingToListen:
+        case AssistUiPhase.listening:
+        case AssistUiPhase.processing:
+        case AssistUiPhase.awaitingComfort:
+          return null;
+        case AssistUiPhase.completed:
+          return 'Your Shruti is ready. Enjoy practicing.';
+        case AssistUiPhase.intro:
+        case AssistUiPhase.verifying:
+        case AssistUiPhase.retry:
+          break;
+      }
+    }
+
     switch (phase) {
       case AssistUiPhase.intro:
         return 'Harmony will play a reference, then ask you to sing.';
@@ -266,6 +367,10 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
             : 'Next, listen again to the updated reference.';
       case AssistUiPhase.retry:
         return 'Try again and hold one comfortable note a little longer.';
+      case AssistUiPhase.startingPointFound:
+        return 'Now let\'s find your comfortable Shruti';
+      case AssistUiPhase.awaitingComfort:
+        return null;
       case AssistUiPhase.completed:
         return 'Your Shruti is ready. Enjoy practicing.';
     }
@@ -291,12 +396,33 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       case AssistUiPhase.listening:
       case AssistUiPhase.processing:
       case AssistUiPhase.showingTransition:
+      case AssistUiPhase.startingPointFound:
         return [
           SizedBox(
             height: DesignTokens.controlHeight,
             child: OutlinedButton(
               onPressed: busy ? null : _controller.stopSession,
               child: const Text('Stop'),
+            ),
+          ),
+        ];
+      case AssistUiPhase.awaitingComfort:
+        return [
+          SizedBox(
+            height: DesignTokens.controlHeight,
+            child: FilledButton(
+              key: const ValueKey<String>('assist-comfortable'),
+              onPressed: busy ? null : _controller.reportComfortable,
+              child: const Text('Comfortable'),
+            ),
+          ),
+          const SizedBox(height: DesignTokens.spaceMd),
+          SizedBox(
+            height: DesignTokens.controlHeight,
+            child: OutlinedButton(
+              key: const ValueKey<String>('assist-not-comfortable'),
+              onPressed: busy ? null : _controller.reportNotComfortable,
+              child: const Text('Not comfortable'),
             ),
           ),
         ];
@@ -348,10 +474,15 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 }
 
 class _ListenProgress extends StatelessWidget {
-  const _ListenProgress({required this.progress, required this.colorScheme});
+  const _ListenProgress({
+    required this.progress,
+    required this.colorScheme,
+    required this.showSingHint,
+  });
 
   final double progress;
   final ColorScheme colorScheme;
+  final bool showSingHint;
 
   @override
   Widget build(BuildContext context) {
@@ -369,15 +500,17 @@ class _ListenProgress extends StatelessWidget {
             color: colorScheme.primary,
           ),
         ),
-        const SizedBox(height: DesignTokens.spaceSm),
-        Text(
-          'Keep singing…',
-          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-            color: colorScheme.primary,
-            fontWeight: FontWeight.w600,
+        if (showSingHint) ...[
+          const SizedBox(height: DesignTokens.spaceSm),
+          Text(
+            'Keep singing…',
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+              color: colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.center,
           ),
-          textAlign: TextAlign.center,
-        ),
+        ],
       ],
     );
   }
