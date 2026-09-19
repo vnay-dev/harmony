@@ -54,6 +54,11 @@ class TargetPitchMatcher {
   int _inToleranceCount = 0;
   int _outOfToleranceCount = 0;
 
+  /// When true (default), nearby-octave singing is folded toward the target.
+  ///
+  /// Range tests that distinguish Lower Sa from Upper Sa set this to false.
+  bool _foldOctaves = true;
+
   TargetPitchMatchState get state => _state;
 
   /// Active target in Hz, or `null` when [state] is [TargetPitchMatchState.waiting].
@@ -68,9 +73,13 @@ class TargetPitchMatcher {
   bool get isMatched => _state == TargetPitchMatchState.matched;
 
   /// Begins a matching trial against [targetFrequencyHz].
-  void start(double targetFrequencyHz) {
+  ///
+  /// When [foldOctaves] is true (default), D4 can match a D3 target. Set
+  /// false when the target octave must be matched literally (e.g. Upper Sa).
+  void start(double targetFrequencyHz, {bool foldOctaves = true}) {
     assert(targetFrequencyHz > 0);
     _targetFrequencyHz = targetFrequencyHz;
+    _foldOctaves = foldOctaves;
     _resetProgress();
     _state = TargetPitchMatchState.listening;
   }
@@ -78,6 +87,7 @@ class TargetPitchMatcher {
   /// Ends the trial and returns to [TargetPitchMatchState.waiting].
   void stop() {
     _targetFrequencyHz = null;
+    _foldOctaves = true;
     _resetProgress();
     _state = TargetPitchMatchState.waiting;
   }
@@ -137,8 +147,10 @@ class TargetPitchMatcher {
       return;
     }
 
-    // Fold nearby-octave singing toward the target so D4 can match D3, etc.
-    final comparisonHz = foldFrequencyTowardReference(frequency, target);
+    // Optionally fold nearby-octave singing toward the target (D4 ↔ D3).
+    final comparisonHz = _foldOctaves
+        ? foldFrequencyTowardReference(frequency, target)
+        : frequency;
     final cents = centsBetweenFrequencies(comparisonHz, target);
     if (cents == null) {
       return;

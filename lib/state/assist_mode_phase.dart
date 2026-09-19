@@ -25,7 +25,7 @@ enum AssistStage {
   /// Stage 1: find the user's natural starting Shruti.
   findingStart,
 
-  /// Stage 2: explore how high they can comfortably match.
+  /// Stage 2: guided Lower Sa → Pa → Upper Sa range check.
   exploringRange,
 }
 
@@ -58,9 +58,24 @@ enum AssistUiPhase {
   /// Stage 1 starting Shruti found; introducing Stage 2.
   startingPointFound,
 
-  /// Stage 2: target matched; waiting for Comfortable / Not comfortable.
+  /// Legacy unused phase (kept out of new flow).
   awaitingComfort,
 
-  /// Comfortable Shruti recommendation ready.
+  /// Lower Sa matched; waiting for audibility Yes / Too low.
+  awaitingLowerAudibility,
+
+  /// Upper Sa matched; waiting for Comfortable / Strained.
+  awaitingUpperComfort,
+
+  /// Candidate passed; introducing the next higher Shruti.
+  exploringNextShruti,
+
+  /// Upper Sa felt strained; upward exploration stopped.
+  rangeBoundaryReached,
+
+  /// First candidate's Upper Sa felt strained; no comfortable Shruti found.
+  rangeUnresolved,
+
+  /// Stage 2 finished (boundary acknowledged or top of range).
   completed,
 }

@@ -16,6 +16,7 @@ import 'package:harmony/ui/screens/assist_mode_screen.dart';
 
 import '../support/fake_audio_service.dart';
 import '../support/fake_pitch_detection_service.dart';
+import '../support/fake_reference_sound_generator.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -42,9 +43,68 @@ void main() {
     return PitchReading(hasPitch: true, frequencyHz: hz, note: pitch);
   }
 
+  PitchReading voicedHz(double hz) {
+    return PitchReading(
+      hasPitch: true,
+      frequencyHz: hz,
+      note: noteFromFrequency(hz),
+    );
+  }
+
   void emitStable(FakePitchDetectionService service, Pitch pitch) {
     for (var i = 0; i < 12; i++) {
       service.emit(voiced(pitch));
+    }
+  }
+
+  void emitStableHz(FakePitchDetectionService service, double hz) {
+    for (var i = 0; i < 12; i++) {
+      service.emit(voicedHz(hz));
+    }
+  }
+
+  void emitForCurrentListen(
+    FakePitchDetectionService detection,
+    AssistModeController controller,
+    Pitch stage1Pitch,
+  ) {
+    if (!controller.isExploringRange) {
+      emitStable(detection, stage1Pitch);
+      return;
+    }
+    final hz = controller.currentRangeTargetHz;
+    if (hz != null) {
+      emitStableHz(detection, hz);
+    }
+  }
+
+  /// Completes Stage 2 with a valid recommendation: first candidate Upper Sa
+  /// Comfortable, next candidate Upper Sa Strained → final = first.
+  Future<void> finishStage2WithoutClimbing(
+    AssistModeController controller,
+  ) async {
+    var markedFirstComfortable = false;
+    for (var i = 0; i < 64; i++) {
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.awaitingLowerAudibility) {
+        await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingUpperComfort) {
+        if (!markedFirstComfortable) {
+          markedFirstComfortable = true;
+          await controller.reportUpperSaComfortable();
+        } else {
+          await controller.reportUpperSaStrained();
+        }
+      } else if (phase == AssistUiPhase.rangeBoundaryReached) {
+        await controller.acknowledgeRangeBoundary();
+      } else if (phase == AssistUiPhase.completed ||
+          phase == AssistUiPhase.intro ||
+          phase == AssistUiPhase.retry ||
+          phase == AssistUiPhase.rangeUnresolved) {
+        return;
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
     }
   }
 
@@ -67,22 +127,18 @@ void main() {
           mismatchesToBecomeUnstable: 2,
         ),
       ),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
       timing: fastTiming,
       initialReferencePitch: pitch,
       prepareAudioSession: () async {},
       wait: (_) async {
         if (controller.uiPhase == AssistUiPhase.listening) {
-          final target = controller.isExploringRange
-              ? (controller.currentExploreCandidate ?? pitch)
-              : pitch;
-          emitStable(detection, target);
+          emitForCurrentListen(detection, controller, pitch);
         }
       },
     );
     await controller.startSession();
-    while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
-      await controller.reportNotComfortable();
-    }
+    await finishStage2WithoutClimbing(controller);
     expect(controller.uiPhase, AssistUiPhase.completed);
     return controller;
   }
@@ -100,6 +156,7 @@ void main() {
           detectionService: FakePitchDetectionService(),
           audioService: FakeAudioService(),
           candidateFinder: buildFinder(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           prepareAudioSession: () async {},
           wait: (_) async {},
         ),
@@ -135,6 +192,7 @@ void main() {
           detectionService: FakePitchDetectionService(),
           audioService: FakeAudioService(),
           candidateFinder: buildFinder(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           timing: const AssistTimingConfig(
             referencePlayDuration: Duration(seconds: 30),
             settlingDuration: Duration(seconds: 30),
@@ -333,6 +391,8 @@ void main() {
                               detectionService: FakePitchDetectionService(),
                               audioService: FakeAudioService(),
                               candidateFinder: buildFinder(),
+                              referenceSoundGenerator:
+                                  FakeReferenceSoundGenerator(),
                               timing: const AssistTimingConfig(
                                 referencePlayDuration: Duration(seconds: 30),
                                 settlingDuration: Duration(seconds: 30),
@@ -415,23 +475,22 @@ void main() {
               mismatchesToBecomeUnstable: 2,
             ),
           ),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           timing: fastTiming,
           initialReferencePitch: Pitch.c,
           prepareAudioSession: () async {},
           wait: (_) async {
             if (assistController.uiPhase == AssistUiPhase.listening) {
-              final target = assistController.isExploringRange
-                  ? (assistController.currentExploreCandidate ??
-                        (pass == 0 ? Pitch.cSharp : Pitch.a))
-                  : (pass == 0 ? Pitch.cSharp : Pitch.a);
-              emitStable(detection, target);
+              emitForCurrentListen(
+                detection,
+                assistController,
+                pass == 0 ? Pitch.cSharp : Pitch.a,
+              );
             }
           },
         );
         await assistController.startSession();
-        while (assistController.uiPhase == AssistUiPhase.awaitingComfort) {
-          await assistController.reportNotComfortable();
-        }
+        await finishStage2WithoutClimbing(assistController);
         expect(assistController.uiPhase, AssistUiPhase.completed);
         expect(assistController.referencePitch, Pitch.cSharp);
       });
@@ -483,12 +542,8 @@ void main() {
 
       pass = 1;
       await tester.runAsync(() async {
-        final restart = assistController.tryAgain();
-        await tester.pump();
-        await restart;
-        while (assistController.uiPhase == AssistUiPhase.awaitingComfort) {
-          await assistController.reportNotComfortable();
-        }
+        await assistController.tryAgain();
+        await finishStage2WithoutClimbing(assistController);
       });
       await tester.pumpAndSettle();
 
@@ -543,6 +598,7 @@ void main() {
           audioService: audio,
           candidateFinder: buildFinder(),
           targetMatcher: buildMatcher(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           timing: fastTiming,
           initialReferencePitch: Pitch.c,
           prepareAudioSession: () async {},
@@ -577,14 +633,14 @@ void main() {
       await tester.pump();
 
       expect(controller.uiPhase, AssistUiPhase.startingPointFound);
-      expect(find.text('We found your match'), findsOneWidget);
+      expect(find.text('Let\'s explore your range'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-prominent-shruti')),
         findsOneWidget,
       );
       expect(find.text(Pitch.cSharp.label), findsOneWidget);
       expect(
-        find.text('Now let\'s find your comfortable Shruti'),
+        find.text('Three notes — low, middle, then high.'),
         findsOneWidget,
       );
       expect(find.textContaining('Hz'), findsNothing);
@@ -592,7 +648,85 @@ void main() {
   );
 
   testWidgets(
-    'Stage 2 comfort prompt shows current Shruti and Listen/Sing cues',
+    'Stage 2 range guide shows current target point',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+      final holdListen = Completer<void>();
+
+      await tester.runAsync(() async {
+        controller = AssistModeController(
+          detectionService: detection,
+          audioService: audio,
+          candidateFinder: buildFinder(),
+          targetMatcher: buildMatcher(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            if (controller.uiPhase == AssistUiPhase.listening) {
+              if (!controller.isExploringRange) {
+                emitStable(detection, Pitch.cSharp);
+                return;
+              }
+              // Hold on first Stage 2 listen so the guide is visible.
+              if (controller.currentRangePoint == AssistRangePoint.lowerSa &&
+                  !holdListen.isCompleted) {
+                await holdListen.future;
+              }
+              emitForCurrentListen(detection, controller, Pitch.cSharp);
+            }
+          },
+        );
+        unawaited(controller.startSession());
+        for (var i = 0; i < 400; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          if (controller.isExploringRange &&
+              controller.uiPhase == AssistUiPhase.listening &&
+              controller.currentRangePoint == AssistRangePoint.lowerSa) {
+            break;
+          }
+        }
+      });
+      addTearDown(() async {
+        holdListen.complete();
+        await controller.stopSession();
+        controller.dispose();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pump();
+
+      expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
+      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(find.text('Follow the target'), findsOneWidget);
+      expect(find.text('Lower Sa'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-range-guide')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('assist-range-target-marker')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Hz'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Stage 2 completion shows the last comfortable Shruti',
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1.0;
@@ -609,22 +743,19 @@ void main() {
           audioService: audio,
           candidateFinder: buildFinder(),
           targetMatcher: buildMatcher(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           timing: fastTiming,
           initialReferencePitch: Pitch.c,
           prepareAudioSession: () async {},
           wait: (_) async {
             if (controller.uiPhase == AssistUiPhase.listening) {
-              emitStable(
-                detection,
-                controller.isExploringRange
-                    ? (controller.currentExploreCandidate ?? Pitch.cSharp)
-                    : Pitch.cSharp,
-              );
+              emitForCurrentListen(detection, controller, Pitch.cSharp);
             }
           },
         );
         await controller.startSession();
-        expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
+        await finishStage2WithoutClimbing(controller);
+        expect(controller.uiPhase, AssistUiPhase.completed);
       });
       addTearDown(controller.dispose);
 
@@ -636,87 +767,14 @@ void main() {
       );
       await tester.pump();
 
-      expect(
-        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
-        findsOneWidget,
-      );
+      expect(find.text('Your comfortable Shruti'), findsOneWidget);
       expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(find.text('How does C# feel?'), findsOneWidget);
-      expect(find.text('Comfortable'), findsOneWidget);
-      expect(find.text('Not comfortable'), findsOneWidget);
-      expect(find.textContaining('Hz'), findsNothing);
-    },
-  );
-
-  testWidgets(
-    'Stage 2 keeps current Shruti visible and updates on comfortable step-up',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-
-      await tester.runAsync(() async {
-        controller = AssistModeController(
-          detectionService: detection,
-          audioService: audio,
-          candidateFinder: buildFinder(),
-          targetMatcher: buildMatcher(),
-          timing: fastTiming,
-          initialReferencePitch: Pitch.c,
-          prepareAudioSession: () async {},
-          wait: (_) async {
-            if (controller.uiPhase == AssistUiPhase.listening) {
-              emitStable(
-                detection,
-                controller.isExploringRange
-                    ? (controller.currentExploreCandidate ?? Pitch.cSharp)
-                    : Pitch.cSharp,
-              );
-            }
-          },
-        );
-        await controller.startSession();
-        expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
-        expect(controller.currentExploreCandidate, Pitch.cSharp);
-      });
-      addTearDown(controller.dispose);
-
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(find.text('How does C# feel?'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
+        find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
         findsOneWidget,
       );
-
-      await tester.runAsync(() async {
-        await controller.reportComfortable();
-      });
-      await tester.pumpAndSettle();
-
-      expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
-      expect(controller.currentExploreCandidate, Pitch.d);
-      expect(find.text(Pitch.d.label), findsOneWidget);
-      expect(find.text(Pitch.cSharp.label), findsNothing);
-      expect(find.text('How does D feel?'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
-        findsOneWidget,
-      );
+      expect(find.text('Could you hear and match the lower Sa?'), findsNothing);
       expect(find.textContaining('Hz'), findsNothing);
-      expect(find.textContaining('cents'), findsNothing);
     },
   );
 
@@ -740,12 +798,11 @@ void main() {
           audioService: audio,
           candidateFinder: buildFinder(),
           targetMatcher: buildMatcher(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
           timing: fastTiming,
           initialReferencePitch: Pitch.c,
           prepareAudioSession: () async {},
           wait: (_) async {
-            // During Stage 1 of a restarted session, prior Stage 1/2 Shruti
-            // state must already be cleared.
             if (pass == 1 &&
                 !sawClearedMidRestart &&
                 !controller.isExploringRange &&
@@ -753,24 +810,20 @@ void main() {
                     controller.uiPhase == AssistUiPhase.listening)) {
               expect(controller.stage1Shruti, isNull);
               expect(controller.currentExploreCandidate, isNull);
+              expect(controller.currentRangePoint, isNull);
               sawClearedMidRestart = true;
             }
             if (controller.uiPhase == AssistUiPhase.listening) {
-              final pitch = pass == 0
-                  ? (controller.isExploringRange
-                        ? (controller.currentExploreCandidate ?? Pitch.e)
-                        : Pitch.e)
-                  : (controller.isExploringRange
-                        ? (controller.currentExploreCandidate ?? Pitch.a)
-                        : Pitch.a);
-              emitStable(detection, pitch);
+              emitForCurrentListen(
+                detection,
+                controller,
+                pass == 0 ? Pitch.e : Pitch.a,
+              );
             }
           },
         );
         await controller.startSession();
-        while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
-          await controller.reportNotComfortable();
-        }
+        await finishStage2WithoutClimbing(controller);
         expect(controller.referencePitch, Pitch.e);
         expect(controller.stage1Shruti, Pitch.e);
       });
@@ -790,9 +843,7 @@ void main() {
       pass = 1;
       await tester.runAsync(() async {
         await controller.tryAgain();
-        while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
-          await controller.reportNotComfortable();
-        }
+        await finishStage2WithoutClimbing(controller);
       });
       await tester.pumpAndSettle();
 
@@ -806,6 +857,181 @@ void main() {
       );
       expect(controller.stage1Shruti, Pitch.a);
       expect(controller.referencePitch, Pitch.a);
+    },
+  );
+
+  Future<AssistModeController> buildSessionAtPhase({
+    required FakePitchDetectionService detection,
+    required FakeAudioService audio,
+    required AssistUiPhase targetPhase,
+    Pitch pitch = Pitch.cSharp,
+  }) async {
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: detection,
+      audioService: audio,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (_) async {
+        if (controller.uiPhase == AssistUiPhase.listening) {
+          emitForCurrentListen(detection, controller, pitch);
+        }
+      },
+    );
+    await controller.startSession();
+    if (targetPhase == AssistUiPhase.awaitingUpperComfort) {
+      await controller.reportLowerSaAudible();
+    }
+    expect(controller.uiPhase, targetPhase);
+    return controller;
+  }
+
+  void expectNoRenderOverflow(WidgetTester tester) {
+    expect(tester.takeException(), isNull);
+    // RenderFlex overflow paints a yellow/black stripe Text; ensure absent.
+    expect(find.textContaining('OVERFLOWING'), findsNothing);
+    expect(find.textContaining('Bottom overflowed'), findsNothing);
+  }
+
+  testWidgets(
+    'Lower Sa audibility question fits on a small phone without overflow',
+    (tester) async {
+      // Compact Android-like size where the old Spacer Column overflowed ~59px.
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+
+      await tester.runAsync(() async {
+        controller = await buildSessionAtPhase(
+          detection: detection,
+          audio: audio,
+          targetPhase: AssistUiPhase.awaitingLowerAudibility,
+        );
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expectNoRenderOverflow(tester);
+      expect(
+        find.text('Could you hear and match the lower Sa?'),
+        findsOneWidget,
+      );
+      expect(find.text('Yes'), findsOneWidget);
+      expect(find.text('No, it was too low'), findsOneWidget);
+      expect(find.text('Stop'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-range-guide')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey<String>('assist-content-scroll')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'Upper Sa comfort question fits on a small phone without overflow',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+
+      await tester.runAsync(() async {
+        controller = await buildSessionAtPhase(
+          detection: detection,
+          audio: audio,
+          targetPhase: AssistUiPhase.awaitingUpperComfort,
+        );
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expectNoRenderOverflow(tester);
+      expect(find.text('How did the upper Sa feel?'), findsOneWidget);
+      expect(find.text('Comfortable'), findsOneWidget);
+      expect(find.text('It felt strained'), findsOneWidget);
+      expect(find.text('Stop'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-range-guide')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'question states remain usable at standard phone size',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+
+      await tester.runAsync(() async {
+        controller = await buildSessionAtPhase(
+          detection: detection,
+          audio: audio,
+          targetPhase: AssistUiPhase.awaitingLowerAudibility,
+        );
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expectNoRenderOverflow(tester);
+      expect(find.text('Yes'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-range-guide')),
+        findsOneWidget,
+      );
+
+      await tester.runAsync(() async {
+        await controller.reportLowerSaAudible();
+      });
+      await tester.pumpAndSettle();
+
+      expectNoRenderOverflow(tester);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(find.text('Comfortable'), findsOneWidget);
+      expect(find.text('It felt strained'), findsOneWidget);
     },
   );
 }
