@@ -219,4 +219,32 @@ void main() {
     feedUntilMatched(targetHz);
     expect(matcher.state, TargetPitchMatchState.matched);
   });
+
+  test('same pitch class one octave above still matches', () {
+    matcher.start(targetHz); // D3
+    final d4 = targetHz * 2;
+
+    feedUntilMatched(d4);
+    expect(matcher.state, TargetPitchMatchState.matched);
+    expect(matcher.centsFromTarget!.abs(), lessThanOrEqualTo(50));
+  });
+
+  test('same pitch class one octave below still matches', () {
+    matcher.start(targetHz); // D3
+    final d2 = targetHz / 2;
+
+    feedUntilMatched(d2);
+    expect(matcher.state, TargetPitchMatchState.matched);
+    expect(matcher.centsFromTarget!.abs(), lessThanOrEqualTo(50));
+  });
+
+  test('wrong pitch class does not match even in a nearby octave', () {
+    matcher.start(targetHz); // D3
+    // C#4 is a different pitch class from D.
+    final cSharp4 = frequencyHzForPitch(Pitch.cSharp, octave: 4);
+
+    feed(cSharp4, 20);
+    expect(matcher.isMatched, isFalse);
+    expect(matcher.centsFromTarget!.abs(), greaterThan(50));
+  });
 }

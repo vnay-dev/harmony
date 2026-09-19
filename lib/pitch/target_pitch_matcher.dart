@@ -1,6 +1,7 @@
 import 'package:harmony/pitch/frequency_to_note.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
+import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 
 /// Whether the singer is successfully matching a target frequency.
 enum TargetPitchMatchState {
@@ -136,7 +137,9 @@ class TargetPitchMatcher {
       return;
     }
 
-    final cents = centsBetweenFrequencies(frequency, target);
+    // Fold nearby-octave singing toward the target so D4 can match D3, etc.
+    final comparisonHz = foldFrequencyTowardReference(frequency, target);
+    final cents = centsBetweenFrequencies(comparisonHz, target);
     if (cents == null) {
       return;
     }

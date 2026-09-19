@@ -20,6 +20,15 @@ class AssistTimingConfig {
   final Duration transitionDuration;
 }
 
+/// Which Assist Mode stage is active.
+enum AssistStage {
+  /// Stage 1: find the user's natural starting Shruti.
+  findingStart,
+
+  /// Stage 2: explore how high they can comfortably match.
+  exploringRange,
+}
+
 /// Presentation phases for Assist Mode V2 discrete rounds.
 enum AssistUiPhase {
   /// Pre-session introduction.
@@ -46,6 +55,12 @@ enum AssistUiPhase {
   /// Not enough stable singing; ask to try the round again.
   retry,
 
-  /// Reference has converged; comfortable Shruti found.
+  /// Stage 1 starting Shruti found; introducing Stage 2.
+  startingPointFound,
+
+  /// Stage 2: target matched; waiting for Comfortable / Not comfortable.
+  awaitingComfort,
+
+  /// Comfortable Shruti recommendation ready.
   completed,
 }

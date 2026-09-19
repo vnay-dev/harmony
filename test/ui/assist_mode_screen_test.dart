@@ -8,6 +8,7 @@ import 'package:harmony/pitch/frequency_to_note.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
+import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/app_theme.dart';
@@ -57,16 +58,31 @@ void main() {
       detectionService: detection,
       audioService: audio,
       candidateFinder: buildFinder(),
+      targetMatcher: TargetPitchMatcher(
+        toleranceCents: 50,
+        samplesToMatch: 4,
+        samplesToLoseMatch: 2,
+        stabilityTracker: PitchStabilityTracker(
+          samplesToBecomeStable: 3,
+          mismatchesToBecomeUnstable: 2,
+        ),
+      ),
       timing: fastTiming,
       initialReferencePitch: pitch,
       prepareAudioSession: () async {},
       wait: (_) async {
         if (controller.uiPhase == AssistUiPhase.listening) {
-          emitStable(detection, pitch);
+          final target = controller.isExploringRange
+              ? (controller.currentExploreCandidate ?? pitch)
+              : pitch;
+          emitStable(detection, target);
         }
       },
     );
     await controller.startSession();
+    while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
+      await controller.reportNotComfortable();
+    }
     expect(controller.uiPhase, AssistUiPhase.completed);
     return controller;
   }
@@ -175,7 +191,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('We found your comfortable Shruti'), findsOneWidget);
+      expect(find.text('Your comfortable Shruti'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
         findsOneWidget,
@@ -390,16 +406,32 @@ void main() {
           detectionService: detection,
           audioService: assistAudio,
           candidateFinder: buildFinder(),
+          targetMatcher: TargetPitchMatcher(
+            toleranceCents: 50,
+            samplesToMatch: 4,
+            samplesToLoseMatch: 2,
+            stabilityTracker: PitchStabilityTracker(
+              samplesToBecomeStable: 3,
+              mismatchesToBecomeUnstable: 2,
+            ),
+          ),
           timing: fastTiming,
           initialReferencePitch: Pitch.c,
           prepareAudioSession: () async {},
           wait: (_) async {
             if (assistController.uiPhase == AssistUiPhase.listening) {
-              emitStable(detection, pass == 0 ? Pitch.cSharp : Pitch.a);
+              final target = assistController.isExploringRange
+                  ? (assistController.currentExploreCandidate ??
+                        (pass == 0 ? Pitch.cSharp : Pitch.a))
+                  : (pass == 0 ? Pitch.cSharp : Pitch.a);
+              emitStable(detection, target);
             }
           },
         );
         await assistController.startSession();
+        while (assistController.uiPhase == AssistUiPhase.awaitingComfort) {
+          await assistController.reportNotComfortable();
+        }
         expect(assistController.uiPhase, AssistUiPhase.completed);
         expect(assistController.referencePitch, Pitch.cSharp);
       });
@@ -454,6 +486,9 @@ void main() {
         final restart = assistController.tryAgain();
         await tester.pump();
         await restart;
+        while (assistController.uiPhase == AssistUiPhase.awaitingComfort) {
+          await assistController.reportNotComfortable();
+        }
       });
       await tester.pumpAndSettle();
 
@@ -474,6 +509,303 @@ void main() {
       expect(drone.selectedPitch, Pitch.g);
       expect(drone.isPlaying, isFalse);
       expect(find.text(Pitch.g.label), findsOneWidget);
+    },
+  );
+
+  TargetPitchMatcher buildMatcher() {
+    return TargetPitchMatcher(
+      toleranceCents: 50,
+      samplesToMatch: 4,
+      samplesToLoseMatch: 2,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+  }
+
+  testWidgets(
+    'Stage 1 result shows detected Shruti before Stage 2 begins',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+      final holdForever = Completer<void>();
+
+      await tester.runAsync(() async {
+        controller = AssistModeController(
+          detectionService: detection,
+          audioService: audio,
+          candidateFinder: buildFinder(),
+          targetMatcher: buildMatcher(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            if (controller.uiPhase == AssistUiPhase.listening) {
+              emitStable(detection, Pitch.cSharp);
+            }
+            if (controller.uiPhase == AssistUiPhase.startingPointFound) {
+              await holdForever.future;
+            }
+          },
+        );
+        unawaited(controller.startSession());
+        for (var i = 0; i < 200; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          if (controller.uiPhase == AssistUiPhase.startingPointFound) {
+            break;
+          }
+        }
+      });
+      addTearDown(() async {
+        await controller.stopSession();
+        controller.dispose();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pump();
+
+      expect(controller.uiPhase, AssistUiPhase.startingPointFound);
+      expect(find.text('We found your match'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
+        findsOneWidget,
+      );
+      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(
+        find.text('Now let\'s find your comfortable Shruti'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Hz'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Stage 2 comfort prompt shows current Shruti and Listen/Sing cues',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+
+      await tester.runAsync(() async {
+        controller = AssistModeController(
+          detectionService: detection,
+          audioService: audio,
+          candidateFinder: buildFinder(),
+          targetMatcher: buildMatcher(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            if (controller.uiPhase == AssistUiPhase.listening) {
+              emitStable(
+                detection,
+                controller.isExploringRange
+                    ? (controller.currentExploreCandidate ?? Pitch.cSharp)
+                    : Pitch.cSharp,
+              );
+            }
+          },
+        );
+        await controller.startSession();
+        expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
+        findsOneWidget,
+      );
+      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(find.text('How does C# feel?'), findsOneWidget);
+      expect(find.text('Comfortable'), findsOneWidget);
+      expect(find.text('Not comfortable'), findsOneWidget);
+      expect(find.textContaining('Hz'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Stage 2 keeps current Shruti visible and updates on comfortable step-up',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+
+      await tester.runAsync(() async {
+        controller = AssistModeController(
+          detectionService: detection,
+          audioService: audio,
+          candidateFinder: buildFinder(),
+          targetMatcher: buildMatcher(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            if (controller.uiPhase == AssistUiPhase.listening) {
+              emitStable(
+                detection,
+                controller.isExploringRange
+                    ? (controller.currentExploreCandidate ?? Pitch.cSharp)
+                    : Pitch.cSharp,
+              );
+            }
+          },
+        );
+        await controller.startSession();
+        expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
+        expect(controller.currentExploreCandidate, Pitch.cSharp);
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(find.text('How does C# feel?'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
+        findsOneWidget,
+      );
+
+      await tester.runAsync(() async {
+        await controller.reportComfortable();
+      });
+      await tester.pumpAndSettle();
+
+      expect(controller.uiPhase, AssistUiPhase.awaitingComfort);
+      expect(controller.currentExploreCandidate, Pitch.d);
+      expect(find.text(Pitch.d.label), findsOneWidget);
+      expect(find.text(Pitch.cSharp.label), findsNothing);
+      expect(find.text('How does D feel?'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Hz'), findsNothing);
+      expect(find.textContaining('cents'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Try Again clears previous Shruti from the Assist UI',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final detection = FakePitchDetectionService();
+      final audio = FakeAudioService();
+      late final AssistModeController controller;
+      var pass = 0;
+      var sawClearedMidRestart = false;
+
+      await tester.runAsync(() async {
+        controller = AssistModeController(
+          detectionService: detection,
+          audioService: audio,
+          candidateFinder: buildFinder(),
+          targetMatcher: buildMatcher(),
+          timing: fastTiming,
+          initialReferencePitch: Pitch.c,
+          prepareAudioSession: () async {},
+          wait: (_) async {
+            // During Stage 1 of a restarted session, prior Stage 1/2 Shruti
+            // state must already be cleared.
+            if (pass == 1 &&
+                !sawClearedMidRestart &&
+                !controller.isExploringRange &&
+                (controller.uiPhase == AssistUiPhase.playingReference ||
+                    controller.uiPhase == AssistUiPhase.listening)) {
+              expect(controller.stage1Shruti, isNull);
+              expect(controller.currentExploreCandidate, isNull);
+              sawClearedMidRestart = true;
+            }
+            if (controller.uiPhase == AssistUiPhase.listening) {
+              final pitch = pass == 0
+                  ? (controller.isExploringRange
+                        ? (controller.currentExploreCandidate ?? Pitch.e)
+                        : Pitch.e)
+                  : (controller.isExploringRange
+                        ? (controller.currentExploreCandidate ?? Pitch.a)
+                        : Pitch.a);
+              emitStable(detection, pitch);
+            }
+          },
+        );
+        await controller.startSession();
+        while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
+          await controller.reportNotComfortable();
+        }
+        expect(controller.referencePitch, Pitch.e);
+        expect(controller.stage1Shruti, Pitch.e);
+      });
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: AssistModeScreen(controller: controller),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text(Pitch.e.label), findsOneWidget);
+      expect(find.text('Your comfortable Shruti'), findsOneWidget);
+
+      pass = 1;
+      await tester.runAsync(() async {
+        await controller.tryAgain();
+        while (controller.uiPhase == AssistUiPhase.awaitingComfort) {
+          await controller.reportNotComfortable();
+        }
+      });
+      await tester.pumpAndSettle();
+
+      expect(sawClearedMidRestart, isTrue);
+      expect(find.text(Pitch.e.label), findsNothing);
+      expect(find.text(Pitch.a.label), findsOneWidget);
+      expect(find.text('Your comfortable Shruti'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
+        findsOneWidget,
+      );
+      expect(controller.stage1Shruti, Pitch.a);
+      expect(controller.referencePitch, Pitch.a);
     },
   );
 }
