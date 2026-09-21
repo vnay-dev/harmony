@@ -7,3 +7,11 @@ Pitch? nextHigherSupportedShruti(Pitch pitch) {
   }
   return Pitch.values[pitch.index + 1];
 }
+
+/// Next lower supported Sa pitch class, or `null` when [pitch] is already C.
+Pitch? nextLowerSupportedShruti(Pitch pitch) {
+  if (pitch.index <= 0) {
+    return null;
+  }
+  return Pitch.values[pitch.index - 1];
+}

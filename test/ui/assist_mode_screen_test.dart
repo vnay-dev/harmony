@@ -164,15 +164,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Find your Shruti'), findsOneWidget);
-    expect(
-      find.text('Harmony will play a reference, then ask you to sing.'),
-      findsOneWidget,
-    );
-    expect(find.text("You don't need to know your pitch."), findsOneWidget);
+    expect(find.text('Sing one comfortable note'), findsOneWidget);
+    expect(find.text('Hold it steady for a few seconds.'), findsOneWidget);
     expect(find.text('Start'), findsOneWidget);
     expect(find.textContaining('Hz'), findsNothing);
     expect(find.textContaining('cents'), findsNothing);
+    expect(find.textContaining('Tanpura'), findsNothing);
+    expect(find.textContaining('Shruti'), findsNothing);
   });
 
   testWidgets('Start enters listen phase without technical pitch details', (
@@ -183,7 +181,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    final holdPlayPhase = Completer<void>();
+    final holdListenPhase = Completer<void>();
 
     await tester.pumpWidget(
       MaterialApp(
@@ -200,7 +198,7 @@ void main() {
             transitionDuration: Duration(seconds: 30),
           ),
           prepareAudioSession: () async {},
-          wait: (_) => holdPlayPhase.future,
+          wait: (_) => holdListenPhase.future,
         ),
       ),
     );
@@ -210,15 +208,16 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Listen to your reference'), findsOneWidget);
-    expect(find.text('Relax and listen.'), findsOneWidget);
+    expect(find.text('Sing one comfortable note'), findsWidgets);
+    expect(find.text('Hold it steady for a few seconds.'), findsOneWidget);
     expect(find.textContaining('Round'), findsOneWidget);
     expect(find.textContaining('Hz'), findsNothing);
     expect(find.textContaining('YIN'), findsNothing);
     expect(find.textContaining('cents'), findsNothing);
-    expect(find.text('Find your Shruti'), findsNothing);
+    expect(find.textContaining('Tanpura'), findsNothing);
+    expect(find.text('Listen to your reference'), findsNothing);
 
-    holdPlayPhase.complete();
+    holdListenPhase.complete();
     await tester.pump();
   });
 
@@ -422,12 +421,13 @@ void main() {
       await tester.tap(find.text('Assist Mode'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Find your Shruti'), findsOneWidget);
+      expect(find.text('Sing one comfortable note'), findsOneWidget);
       await tester.tap(find.text('Start'));
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Listen to your reference'), findsOneWidget);
+      expect(find.text('Sing one comfortable note'), findsWidgets);
+      expect(find.text('Listen to your reference'), findsNothing);
 
       await tester.pageBack();
       await tester.pumpAndSettle();
@@ -710,6 +710,7 @@ void main() {
       await tester.pump();
 
       expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
+      expect(controller.rangeTargetGuidePosition, 0.0);
       expect(find.text(Pitch.cSharp.label), findsOneWidget);
       expect(find.text('Follow the target'), findsOneWidget);
       expect(find.text('Lower Sa'), findsOneWidget);
@@ -719,6 +720,14 @@ void main() {
       );
       expect(
         find.byKey(const ValueKey<String>('assist-range-target-marker')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          ValueKey<String>(
+            'assist-range-target-${AssistRangePoint.lowerSa}',
+          ),
+        ),
         findsOneWidget,
       );
       expect(find.textContaining('Hz'), findsNothing);

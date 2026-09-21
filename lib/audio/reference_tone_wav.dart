@@ -4,8 +4,8 @@ import 'dart:typed_data';
 /// Builds a short mono WAV for a Stage 2 pitch reference.
 ///
 /// Synthesis is intentionally simple and frequency-driven (no sample assets):
-/// a clear fundamental with soft lower harmonics and a gentle amplitude
-/// envelope — warm enough to avoid a bare sine, stable enough for matching.
+/// a clearly dominant fundamental, a subtle 2nd harmonic for warmth, and
+/// strongly reduced higher harmonics — one clear sustained pitch, no FX.
 Uint8List buildReferenceToneWav({
   required double frequencyHz,
   Duration duration = const Duration(seconds: 5),
@@ -32,13 +32,15 @@ Uint8List buildReferenceToneWav({
     (sampleRate * 0.09).round(),
   );
 
-  // Soft harmonic stack inspired by a warm pad (saw-ish), but capped so the
-  // fundamental stays obvious and we avoid splashy high content.
-  const fundamentalAmp = 0.62;
-  const secondHarmonicAmp = 0.28;
-  const thirdHarmonicAmp = 0.12;
-  const fourthHarmonicAmp = 0.05;
-  const peakScale = 0.85;
+  // Pitch clarity first: fundamental leads; 2nd harmonic adds gentle body;
+  // 3rd/4th stay very quiet so a low Sa does not sound mixed with highs.
+  // Spectral balance is controlled by these amplitudes (no FX filter chain).
+  // Keep the 2nd harmonic present enough for natural body — do not over-muffle.
+  const fundamentalAmp = 0.78;
+  const secondHarmonicAmp = 0.20;
+  const thirdHarmonicAmp = 0.03;
+  const fourthHarmonicAmp = 0.008;
+  const peakScale = 0.88;
 
   for (var i = 0; i < totalSamples; i++) {
     final t = i / sampleRate;
@@ -273,6 +275,63 @@ double? estimateWavFundamentalHz(Uint8List wav, {int sampleRate = 44100}) {
 
   // Full cycles ≈ half the zero crossings for a near-sinusoid.
   return (crossings / 2) / seconds;
+}
+
+/// Relative harmonic energies for diagnostics/tests (Goertzel at k·f0).
+///
+/// Returns a map keyed by harmonic number (1 = fundamental). Used only to
+/// assert pitch clarity of Stage 2 reference tones — not for production pitch
+/// detection. Returns `null` when the WAV is too short.
+Map<int, double>? estimateHarmonicEnergies(
+  Uint8List wav, {
+  required double fundamentalHz,
+  int sampleRate = 44100,
+  int maxHarmonic = 4,
+}) {
+  if (wav.length < 44 || fundamentalHz <= 0 || !fundamentalHz.isFinite) {
+    return null;
+  }
+
+  final byteData = ByteData.sublistView(wav);
+  final dataSize = byteData.getUint32(40, Endian.little);
+  final sampleCount = dataSize ~/ 2;
+  if (sampleCount < sampleRate ~/ 10) {
+    return null;
+  }
+
+  // Use the sustained middle of the tone (skip attack / release).
+  final start = (sampleCount * 0.15).round().clamp(0, sampleCount - 1);
+  final end = (sampleCount * 0.85).round().clamp(start + 1, sampleCount);
+  final n = end - start;
+  if (n < 64) {
+    return null;
+  }
+
+  final energies = <int, double>{};
+  for (var harmonic = 1; harmonic <= maxHarmonic; harmonic++) {
+    final targetHz = fundamentalHz * harmonic;
+    if (targetHz >= sampleRate / 2) {
+      energies[harmonic] = 0;
+      continue;
+    }
+
+    final omega = 2 * math.pi * targetHz / sampleRate;
+    final coeff = 2 * math.cos(omega);
+    var s0 = 0.0;
+    var s1 = 0.0;
+    var s2 = 0.0;
+    for (var i = start; i < end; i++) {
+      final sample = byteData.getInt16(44 + i * 2, Endian.little) / 32767.0;
+      s0 = sample + coeff * s1 - s2;
+      s2 = s1;
+      s1 = s0;
+    }
+    final real = s1 - s2 * math.cos(omega);
+    final imag = s2 * math.sin(omega);
+    energies[harmonic] = real * real + imag * imag;
+  }
+
+  return energies;
 }
 
 Uint8List _wrapPcm16MonoWav(Int16List pcm, int sampleRate) {

@@ -92,6 +92,7 @@ class AssistRangeGuide extends StatelessWidget {
                                 : colorScheme.secondary,
                             size: 28,
                             keyName: 'assist-range-target-marker',
+                            identityKey: 'assist-range-target-$currentPoint',
                             child: Icon(
                               matched ? Icons.check : Icons.music_note,
                               size: 16,
@@ -122,8 +123,8 @@ class AssistRangeGuide extends StatelessWidget {
   }
 
   List<Widget> _rungMarkers(ColorScheme colorScheme, double height) {
-    // Lower Sa, Pa (~perfect fifth), Upper Sa on a one-octave guide.
-    const rungs = <double>[0.0, 700 / 1200, 1.0];
+    // Discrete LOW / MID / HIGH slots matching [AssistRangeTargets.guidePositionFor].
+    const rungs = <double>[0.0, 0.5, 1.0];
     return [
       for (final rung in rungs)
         Positioned(
@@ -147,8 +148,10 @@ class AssistRangeGuide extends StatelessWidget {
     required double size,
     required String keyName,
     required Widget child,
+    String? identityKey,
   }) {
     return Positioned(
+      key: identityKey == null ? null : ValueKey<String>(identityKey),
       top: top,
       left: 0,
       right: 0,

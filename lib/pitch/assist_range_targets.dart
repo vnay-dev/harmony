@@ -33,7 +33,14 @@ class AssistRangeTargets {
 
   double get lowerSaHz => frequencyHzForPitch(sa, octave: saOctave);
 
-  double get paHz => frequencyHzForPitch(paPitch, octave: saOctave);
+  /// Perfect fifth above Lower Sa in Hz (always higher than [lowerSaHz]).
+  ///
+  /// When the Pa pitch class wraps past B (e.g. Sa=G → Pa=D), Pa lies in the
+  /// next octave so the range guide and reference tone stay above Lower Sa.
+  double get paHz {
+    final paOctave = sa.index + 7 >= 12 ? saOctave + 1 : saOctave;
+    return frequencyHzForPitch(paPitch, octave: paOctave);
+  }
 
   double get upperSaHz => frequencyHzForPitch(sa, octave: saOctave + 1);
 
@@ -86,9 +93,19 @@ class AssistRangeTargets {
     }
   }
 
-  /// Normalized guide position for [point] (0 = low, 1 = high).
+  /// Discrete guide position for the current range-test target.
+  ///
+  /// Aligned with the range-guide axis: Lower Sa → LOW (0), Pa → MID (0.5),
+  /// Upper Sa → HIGH (1). Independent of live voice mapping.
   double guidePositionFor(AssistRangePoint point) {
-    return guidePositionForHz(frequencyHzFor(point)) ?? 0.0;
+    switch (point) {
+      case AssistRangePoint.lowerSa:
+        return 0.0;
+      case AssistRangePoint.pa:
+        return 0.5;
+      case AssistRangePoint.upperSa:
+        return 1.0;
+    }
   }
 
   /// Maps a live frequency onto the Lower Sa → Upper Sa guide (0–1).

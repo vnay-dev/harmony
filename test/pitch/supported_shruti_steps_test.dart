@@ -13,4 +13,14 @@ void main() {
   test('nextHigherSupportedShruti returns null at B', () {
     expect(nextHigherSupportedShruti(Pitch.b), isNull);
   });
+
+  test('nextLowerSupportedShruti steps down one chromatic step', () {
+    expect(nextLowerSupportedShruti(Pitch.cSharp), Pitch.c);
+    expect(nextLowerSupportedShruti(Pitch.d), Pitch.cSharp);
+    expect(nextLowerSupportedShruti(Pitch.b), Pitch.aSharp);
+  });
+
+  test('nextLowerSupportedShruti returns null at C', () {
+    expect(nextLowerSupportedShruti(Pitch.c), isNull);
+  });
 }

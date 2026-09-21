@@ -7,10 +7,10 @@ class AssistTimingConfig {
     this.transitionDuration = const Duration(seconds: 2),
   });
 
-  /// How long the tanpura plays before singing.
+  /// How long a Stage 2 reference tone plays before singing.
   final Duration referencePlayDuration;
 
-  /// Silence after stopping tanpura before mic analysis starts.
+  /// Silence after stopping reference audio before mic analysis starts.
   final Duration settlingDuration;
 
   /// How long the user should sing while Harmony listens.
@@ -22,11 +22,26 @@ class AssistTimingConfig {
 
 /// Which Assist Mode stage is active.
 enum AssistStage {
-  /// Stage 1: find the user's natural starting Shruti.
+  /// Stage 1: capture a comfortable starting note from the user's voice.
   findingStart,
 
   /// Stage 2: guided Lower Sa → Pa → Upper Sa range check.
   exploringRange,
+}
+
+/// Stage 2 search posture while looking for one comfortable Shruti.
+enum AssistShrutiSearchMode {
+  /// Testing the Stage 1 starting candidate.
+  initial,
+
+  /// At least one comfortable found; climb until Upper Sa is strained.
+  climbing,
+
+  /// Lower Sa was too low; find the first fully comfortable Shruti upward.
+  seekingHigher,
+
+  /// Upper Sa was too high with no prior comfortable; find first fit downward.
+  seekingLower,
 }
 
 /// Presentation phases for Assist Mode V2 discrete rounds.
@@ -34,28 +49,28 @@ enum AssistUiPhase {
   /// Pre-session introduction.
   intro,
 
-  /// Tanpura is playing; pitch analysis is off.
+  /// Reference tone is playing; pitch analysis is off (Stage 2).
   playingReference,
 
-  /// Tanpura stopped; settling before mic analysis.
+  /// Settling before mic analysis.
   preparingToListen,
 
   /// User should sing; pitch analysis is on.
   listening,
 
-  /// Listening ended; computing next reference (no analysis).
+  /// Listening ended; computing next step (no analysis).
   processing,
 
   /// Friendly pause before the next play phase.
   showingTransition,
 
-  /// Candidate reference is close; confirming with another listen cycle.
+  /// Legacy Stage 1 verify phase (unused in voice-only discovery).
   verifying,
 
-  /// Not enough stable singing; ask to try the round again.
+  /// Not enough stable singing; ask to try again.
   retry,
 
-  /// Stage 1 starting Shruti found; introducing Stage 2.
+  /// Stage 1 starting candidate found; introducing Stage 2.
   startingPointFound,
 
   /// Legacy unused phase (kept out of new flow).
@@ -67,13 +82,13 @@ enum AssistUiPhase {
   /// Upper Sa matched; waiting for Comfortable / Strained.
   awaitingUpperComfort,
 
-  /// Candidate passed; introducing the next higher Shruti.
+  /// Introducing the next Shruti to test.
   exploringNextShruti,
 
-  /// Upper Sa felt strained; upward exploration stopped.
+  /// Climbing stopped at a strained Upper Sa; last comfortable is ready.
   rangeBoundaryReached,
 
-  /// First candidate's Upper Sa felt strained; no comfortable Shruti found.
+  /// No comfortable Shruti found within supported bounds.
   rangeUnresolved,
 
   /// Stage 2 finished (boundary acknowledged or top of range).
