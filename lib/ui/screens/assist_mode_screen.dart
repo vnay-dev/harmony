@@ -13,7 +13,7 @@ import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
 import 'package:harmony/ui/components/assist_range_guide.dart';
 
-/// Assist Mode: Stage 1 find starting Shruti, Stage 2 guided range check.
+/// Assist Mode: Stage 1 capture a starting note, Stage 2 guided range check.
 class AssistModeScreen extends StatefulWidget {
   const AssistModeScreen({
     super.key,
@@ -248,7 +248,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                             if (uiPhase == AssistUiPhase.intro) ...[
                               const SizedBox(height: DesignTokens.spaceMd),
                               Text(
-                                "You don't need to know your pitch.",
+                                'Hold it steady for a few seconds.',
                                 style: textTheme.bodyLarge?.copyWith(
                                   color: colorScheme.onSurface.withValues(
                                     alpha: 0.72,
@@ -307,24 +307,21 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
   }
 
   String _cycleHint(AssistUiPhase phase) {
+    if (_controller.isExploringRange) {
+      return '';
+    }
     switch (phase) {
-      case AssistUiPhase.playingReference:
-        return 'LISTEN → sing → Harmony adjusts';
-      case AssistUiPhase.preparingToListen:
       case AssistUiPhase.listening:
-        return _controller.isVerifying
-            ? 'listen → SING → confirm'
-            : 'listen → SING → Harmony adjusts';
+        return 'Hold your note';
       case AssistUiPhase.processing:
       case AssistUiPhase.showingTransition:
-        return _controller.isVerifying
-            ? 'listen → sing → CONFIRM'
-            : 'listen → sing → HARMONY ADJUSTS';
-      case AssistUiPhase.verifying:
-        return 'Almost there — confirming';
+        return 'Starting point found';
       case AssistUiPhase.retry:
-        return 'Let\'s try this round again';
+        return 'Let\'s try again';
       case AssistUiPhase.intro:
+      case AssistUiPhase.playingReference:
+      case AssistUiPhase.preparingToListen:
+      case AssistUiPhase.verifying:
       case AssistUiPhase.startingPointFound:
       case AssistUiPhase.awaitingComfort:
       case AssistUiPhase.awaitingLowerAudibility:
@@ -382,22 +379,18 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 
     switch (phase) {
       case AssistUiPhase.intro:
-        return 'Find your Shruti';
+        return 'Sing one comfortable note';
       case AssistUiPhase.playingReference:
-        return 'Listen to your reference';
       case AssistUiPhase.verifying:
-        return 'Listen once more';
       case AssistUiPhase.preparingToListen:
-        return 'Get ready';
+        return 'Sing one comfortable note';
       case AssistUiPhase.listening:
-        return _controller.isVerifying
-            ? 'Sing your comfortable note again.'
-            : 'Now, sing comfortably and hold your note.';
+        return 'Sing one comfortable note';
       case AssistUiPhase.processing:
       case AssistUiPhase.showingTransition:
-        return 'Lovely. Take a moment to listen.';
+        return 'Got it.';
       case AssistUiPhase.retry:
-        return "I couldn't catch a steady note";
+        return "I couldn't catch a steady note.";
       case AssistUiPhase.startingPointFound:
         return 'Let\'s explore your range';
       case AssistUiPhase.awaitingComfort:
@@ -435,7 +428,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
               ? 'We can stop exploring higher for now.'
               : 'We\'ll use ${comfortable.label} — the last pitch that felt comfortable.';
         case AssistUiPhase.rangeUnresolved:
-          return 'The first pitch already felt strained. Try again, or choose a Shruti in Default Mode.';
+          return 'We couldn\'t find a comfortable Shruti yet. Try again, or choose one in Default Mode.';
         case AssistUiPhase.showingTransition:
         case AssistUiPhase.playingReference:
         case AssistUiPhase.preparingToListen:
@@ -454,25 +447,17 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 
     switch (phase) {
       case AssistUiPhase.intro:
-        return 'Harmony will play a reference, then ask you to sing.';
+        return null;
       case AssistUiPhase.playingReference:
-        return 'Relax and listen.';
       case AssistUiPhase.verifying:
-        return 'Harmony thinks this reference fits — confirming with you.';
       case AssistUiPhase.preparingToListen:
-        return 'When you are ready, sing one comfortable note.';
       case AssistUiPhase.listening:
-        return 'Keep holding the same note.';
+        return 'Hold it steady for a few seconds.';
       case AssistUiPhase.processing:
-        return _controller.isVerifying
-            ? 'Checking that this still feels right.'
-            : 'Harmony is gently adjusting your reference.';
       case AssistUiPhase.showingTransition:
-        return _controller.isVerifying
-            ? 'One more listen to confirm.'
-            : 'Next, listen again to the updated reference.';
+        return 'Let\'s find what feels comfortable for your voice.';
       case AssistUiPhase.retry:
-        return 'Try again and hold one comfortable note a little longer.';
+        return 'Try again and hold one comfortable note.';
       case AssistUiPhase.startingPointFound:
         return 'Three notes — low, middle, then high.';
       case AssistUiPhase.awaitingComfort:
@@ -489,7 +474,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
             ? 'We can stop exploring higher for now.'
             : 'We\'ll use ${comfortable.label} — the last pitch that felt comfortable.';
       case AssistUiPhase.rangeUnresolved:
-        return 'The first pitch already felt strained. Try again, or choose a Shruti in Default Mode.';
+        return 'We couldn\'t find a comfortable Shruti yet. Try again, or choose one in Default Mode.';
       case AssistUiPhase.completed:
         return 'This is the last Shruti where the upper Sa felt comfortable.';
     }

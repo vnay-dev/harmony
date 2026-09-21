@@ -23,13 +23,15 @@ export 'package:harmony/pitch/assist_range_targets.dart';
 export 'package:harmony/state/assist_candidate_range_result.dart';
 export 'package:harmony/state/assist_mode_phase.dart';
 
-/// Orchestrates Assist Mode as Stage 1 (find starting Shruti) then Stage 2
-/// (guided Lower Sa → Pa → Upper Sa range check).
+/// Orchestrates Assist Mode as Stage 1 (capture a comfortable starting note)
+/// then Stage 2 (guided Lower Sa → Pa → Upper Sa range check).
 ///
-/// Tanpura playback and pitch analysis never overlap. Analysis runs only in
-/// [AssistUiPhase.listening], after playback has stopped and settled.
-/// Stage 2 range references use [ReferenceSoundGenerator]; Stage 1 keeps the
-/// existing Tanpura [AudioService] path.
+/// Stage 1 listens to the user's voice only — no Tanpura or reference playback.
+/// A stable voice candidate is mapped to the nearest supported Shruti and used
+/// only as the Stage 2 starting point (not a final Shruti).
+///
+/// Stage 2 range references use [ReferenceSoundGenerator]. Pitch analysis runs
+/// only in [AssistUiPhase.listening], never overlapping reference playback.
 class AssistModeController extends ChangeNotifier {
   AssistModeController({
     required PitchDetectionService detectionService,
@@ -57,7 +59,7 @@ class AssistModeController extends ChangeNotifier {
   /// Durations for play / settle / listen / transition.
   final AssistTimingConfig timing;
 
-  /// Starting Sa pitch class for Stage 1 round 1.
+  /// Fallback pitch before Stage 1 captures a starting note (also used after reset).
   final Pitch initialReferencePitch;
 
   final PitchDetectionService _detectionService;
@@ -79,10 +81,6 @@ class AssistModeController extends ChangeNotifier {
   bool _isSessionActive = false;
   bool _pitchAnalysisEnabled = false;
   bool _isDisposed = false;
-  bool _isVerifying = false;
-
-  /// Whether the first stable voice pitch has seeded the initial Shruti candidate.
-  bool _didApplyInitialShrutiCandidate = false;
   String? _errorMessage;
 
   AssistUiPhase _uiPhase = AssistUiPhase.intro;
@@ -91,7 +89,7 @@ class AssistModeController extends ChangeNotifier {
   Pitch _referencePitch = Pitch.defaultPitch;
   double _listenProgress = 0;
 
-  /// Stage 1 result locked when verification succeeds.
+  /// Stage 1 starting Shruti locked when a stable voice candidate is accepted.
   Pitch? _stage1Shruti;
 
   /// Candidate Shruti currently under Stage 2 range test.
@@ -121,6 +119,15 @@ class AssistModeController extends ChangeNotifier {
 
   /// Candidate where Upper Sa felt strained (upper boundary), if any.
   Pitch? _currentBoundaryShruti;
+
+  /// Stage 2 search posture (climb / seek higher / seek lower).
+  AssistShrutiSearchMode _searchMode = AssistShrutiSearchMode.initial;
+
+  /// True after the user confirmed Lower Sa is audible on some candidate.
+  ///
+  /// While climbing, later candidates skip the Lower Sa question because the
+  /// lower side already moved up with the previous comfortable Shruti.
+  bool _lowerSideAccessible = false;
 
   /// Latched successful capture for the current Stage 1 listen window.
   StablePitchCandidate? _acceptedListenCandidate;
@@ -219,8 +226,11 @@ class AssistModeController extends ChangeNotifier {
   /// Candidate where Upper Sa felt strained (detected upper boundary).
   Pitch? get currentBoundaryShruti => _currentBoundaryShruti;
 
-  /// True while confirming a converged candidate with another listen cycle.
-  bool get isVerifying => _isVerifying;
+  /// Current Stage 2 search posture (for tests / diagnostics).
+  AssistShrutiSearchMode get searchMode => _searchMode;
+
+  /// Legacy Stage 1 verify flag — always false after voice-only discovery.
+  bool get isVerifying => false;
 
   /// True only while pitch readings are accepted for analysis.
   bool get isPitchAnalysisEnabled => _pitchAnalysisEnabled;
@@ -242,16 +252,13 @@ class AssistModeController extends ChangeNotifier {
 
     _isBusy = true;
     _errorMessage = null;
-    _isVerifying = false;
     _currentRound = 0;
     _listenProgress = 0;
     _clearListenCapture();
     _candidateFinder.reset();
     _pitchAdjuster.reset();
     _clearStage2State();
-    _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
-    _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
     notifyListeners();
 
     final generation = ++_sessionGeneration;
@@ -324,19 +331,14 @@ class AssistModeController extends ChangeNotifier {
     _sessionGeneration += 1;
     await _resetToIntro();
 
-    // Bootstrap a new search the same way [startSession] does. Smart Shruti
-    // start remains available because [_didApplyInitialShrutiCandidate] was
-    // cleared in [_resetToIntro].
-    _isVerifying = false;
+    // Bootstrap a new search the same way [startSession] does.
     _currentRound = 0;
     _listenProgress = 0;
     _clearListenCapture();
     _candidateFinder.reset();
     _pitchAdjuster.reset();
     _clearStage2State();
-    _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
-    _pitchAdjuster.start(frequencyHzForPitch(initialReferencePitch));
 
     final generation = ++_sessionGeneration;
 
@@ -373,6 +375,7 @@ class AssistModeController extends ChangeNotifier {
     final generation = _sessionGeneration;
     final result = _activeCandidateResult;
     result?.lowerSaAudible = true;
+    _lowerSideAccessible = true;
 
     _currentRangePoint = AssistRangePoint.pa;
     _rangeMatchAccepted = false;
@@ -394,7 +397,10 @@ class AssistModeController extends ChangeNotifier {
     await _runRangeTestLoop(generation);
   }
 
-  /// Lower Sa was too low — reject candidate and explore the next higher Shruti.
+  /// Lower Sa was too low — reject candidate and seek the next higher Shruti.
+  ///
+  /// Search mode becomes [AssistShrutiSearchMode.seekingHigher]: stop at the
+  /// first fully comfortable candidate found while moving up.
   Future<void> reportLowerSaTooLow() async {
     if (_isBusy ||
         _isDisposed ||
@@ -408,7 +414,26 @@ class AssistModeController extends ChangeNotifier {
 
     final generation = _sessionGeneration;
     final result = _activeCandidateResult;
+    final current = _currentCandidate;
     result?.lowerSaAudible = false;
+    _lowerSideAccessible = false;
+
+    if (_searchMode == AssistShrutiSearchMode.seekingLower) {
+      // Moving down hit an inaccessible Lower Sa — no supported fit remains.
+      _currentBoundaryShruti ??= current;
+      _setPhase(AssistUiPhase.rangeUnresolved);
+      _isBusy = false;
+      notifyListeners();
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag LOWER_TOO_LOW candidate=${current?.label} '
+          'while seekingLower → unresolved',
+        );
+      }
+      return;
+    }
+
+    _searchMode = AssistShrutiSearchMode.seekingHigher;
 
     // Leave awaiting immediately so a second tap cannot double-advance.
     _setPhase(AssistUiPhase.exploringNextShruti);
@@ -417,18 +442,22 @@ class AssistModeController extends ChangeNotifier {
 
     if (kDebugMode) {
       debugPrint(
-        'AssistDiag LOWER_TOO_LOW candidate=${_currentCandidate?.label} '
-        '→ explore next higher',
+        'AssistDiag LOWER_TOO_LOW candidate=${current?.label} '
+        '→ seekingHigher',
       );
     }
 
-    await _moveToNextCandidateOrFinish(
+    await _advanceCandidateOrFinish(
       generation,
+      upward: true,
       alreadyShowingExploringNext: true,
     );
   }
 
-  /// Upper Sa felt comfortable — explore the next higher Shruti.
+  /// Upper Sa felt comfortable.
+  ///
+  /// - Climbing after a fit: keep exploring higher until strain.
+  /// - Seeking higher/lower after a miss: this is the first fit — finish.
   Future<void> reportUpperSaComfortable() async {
     if (_isBusy ||
         _isDisposed ||
@@ -447,31 +476,50 @@ class AssistModeController extends ChangeNotifier {
     if (current != null) {
       _lastComfortableShruti = current;
     }
+    _lowerSideAccessible = true;
 
-    // Leave awaiting immediately so a second tap cannot double-advance.
-    _setPhase(AssistUiPhase.exploringNextShruti);
-    _isBusy = false;
-    notifyListeners();
+    final stopAtFirstFit =
+        _searchMode == AssistShrutiSearchMode.seekingHigher ||
+        _searchMode == AssistShrutiSearchMode.seekingLower;
 
     if (kDebugMode) {
       debugPrint(
         'AssistDiag UPPER_COMFORTABLE candidate=${current?.label} '
-        '→ lastComfortable=${_lastComfortableShruti?.label} '
-        '→ explore next higher',
+        'mode=${_searchMode.name} '
+        'stopAtFirstFit=$stopAtFirstFit',
       );
     }
 
-    await _moveToNextCandidateOrFinish(
+    if (stopAtFirstFit) {
+      // First fully comfortable Shruti while seeking — done.
+      try {
+        await _completeRangeTest(current!);
+      } finally {
+        _isBusy = false;
+        if (!_isDisposed) {
+          notifyListeners();
+        }
+      }
+      return;
+    }
+
+    // Initial fit or climbing — explore the next higher Shruti.
+    _searchMode = AssistShrutiSearchMode.climbing;
+    _setPhase(AssistUiPhase.exploringNextShruti);
+    _isBusy = false;
+    notifyListeners();
+
+    await _advanceCandidateOrFinish(
       generation,
+      upward: true,
       alreadyShowingExploringNext: true,
     );
   }
 
-  /// Upper Sa felt strained — stop upward exploration at the boundary.
+  /// Upper Sa felt strained.
   ///
-  /// The strained candidate is never recommended. Final Shruti is the last
-  /// candidate marked comfortable, or [AssistUiPhase.rangeUnresolved] when
-  /// none exists.
+  /// - If a prior comfortable exists (climbing): stop at that boundary.
+  /// - Otherwise: seek one Shruti lower and stop at the first full fit.
   Future<void> reportUpperSaStrained() async {
     if (_isBusy ||
         _isDisposed ||
@@ -483,26 +531,58 @@ class AssistModeController extends ChangeNotifier {
     _isBusy = true;
     notifyListeners();
 
+    final generation = _sessionGeneration;
     final result = _activeCandidateResult;
     final current = _currentCandidate;
     result?.upperSaComfortable = false;
     _currentBoundaryShruti = current;
 
+    if (_lastComfortableShruti != null) {
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+          'lastComfortable=${_lastComfortableShruti?.label} → boundary',
+        );
+      }
+      _setPhase(AssistUiPhase.rangeBoundaryReached);
+      _isBusy = false;
+      notifyListeners();
+      return;
+    }
+
+    if (_searchMode == AssistShrutiSearchMode.seekingHigher) {
+      // Audible lower but strained upper while seeking after "too low" —
+      // no single supported Shruti fully fits.
+      _setPhase(AssistUiPhase.rangeUnresolved);
+      _isBusy = false;
+      notifyListeners();
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+          'while seekingHigher → unresolved',
+        );
+      }
+      return;
+    }
+
+    // Too high with no prior comfortable — seek downward.
+    _searchMode = AssistShrutiSearchMode.seekingLower;
+    _setPhase(AssistUiPhase.exploringNextShruti);
+    _isBusy = false;
+    notifyListeners();
+
     if (kDebugMode) {
       debugPrint(
         'AssistDiag UPPER_STRAINED candidate=${current?.label} '
-        'lastComfortable=${_lastComfortableShruti?.label} '
-        '→ ${_lastComfortableShruti == null ? "unresolved" : "boundary"}',
+        '→ seekingLower',
       );
     }
 
-    if (_lastComfortableShruti == null) {
-      _setPhase(AssistUiPhase.rangeUnresolved);
-    } else {
-      _setPhase(AssistUiPhase.rangeBoundaryReached);
-    }
-    _isBusy = false;
-    notifyListeners();
+    await _advanceCandidateOrFinish(
+      generation,
+      upward: false,
+      alreadyShowingExploringNext: true,
+    );
   }
 
   /// Acknowledges the upper-boundary message and finishes with the last
@@ -516,7 +596,6 @@ class AssistModeController extends ChangeNotifier {
 
     final recommended = _lastComfortableShruti;
     if (recommended == null) {
-      // Should not happen; strained-without-prior goes to rangeUnresolved.
       _setPhase(AssistUiPhase.rangeUnresolved);
       notifyListeners();
       return;
@@ -552,7 +631,9 @@ class AssistModeController extends ChangeNotifier {
     }
   }
 
-  /// Runs one full play → settle → listen → process cycle.
+  /// Runs one Stage 1 capture cycle: listen for a stable voice note (no
+  /// reference audio), map it to the nearest supported Shruti, then enter
+  /// Stage 2 with that pitch as the starting candidate only.
   ///
   /// Returns `true` when the cycle finished normally for this generation.
   Future<bool> _playAndListenRound(
@@ -568,38 +649,13 @@ class AssistModeController extends ChangeNotifier {
     }
     _listenProgress = 0;
 
-    // 1) PLAY — tanpura on, analysis off.
-    _setPhase(
-      _isVerifying ? AssistUiPhase.verifying : AssistUiPhase.playingReference,
-    );
+    // Ensure no reference / Tanpura audio is playing during initial discovery.
     _disablePitchAnalysis();
-    await _safeStopDetection();
-    try {
-      await _playReferenceForPitch(_referencePitch);
-    } on AudioServiceException catch (error) {
-      _errorMessage = error.message;
-      await _resetToIntro();
-      notifyListeners();
-      return false;
-    }
-
-    await _awaitPhase(timing.referencePlayDuration, generation);
-    if (!_isActive(generation)) {
-      return false;
-    }
-
-    // 2) STOP tanpura + settle — analysis still off.
-    _setPhase(AssistUiPhase.preparingToListen);
     await _safePauseAudio();
-    _disablePitchAnalysis();
+    await _safeStopReferenceSound();
     await _safeStopDetection();
 
-    await _awaitPhase(timing.settlingDuration, generation);
-    if (!_isActive(generation)) {
-      return false;
-    }
-
-    // 3) LISTEN — analysis on only now.
+    // LISTEN — mic on, reference audio off.
     _candidateFinder.reset();
     _clearListenCapture();
     _rawF0LogCounter = 0;
@@ -625,8 +681,7 @@ class AssistModeController extends ChangeNotifier {
       return false;
     }
 
-    // 4) END LISTENING — leave listening/failure eligibility before stopping
-    // audio. An already-accepted candidate must win over the listen timeout.
+    // END LISTENING — leave listening/failure eligibility before stopping.
     final timedOutWithoutAccept = _acceptedListenCandidate == null;
     if (timedOutWithoutAccept && kDebugMode) {
       debugPrint('AssistDiag LISTEN_TIMEOUT');
@@ -661,124 +716,55 @@ class AssistModeController extends ChangeNotifier {
       );
     }
 
-    _applyInitialShrutiCandidateIfNeeded(observation);
-
-    final previousPitch = _referencePitch;
-    final previousHz =
-        _pitchAdjuster.referenceFrequencyHz ??
-        frequencyHzForPitch(_referencePitch);
-    final adjustment = _pitchAdjuster.observe(observation.frequencyHz);
-    _logCycleDecision(
-      previousPitch: previousPitch,
-      previousHz: previousHz,
-      observation: observation,
-      adjustment: adjustment,
-    );
-
-    switch (adjustment.kind) {
-      case ReferenceMatchKind.rejected:
-        _setPhase(AssistUiPhase.retry);
-        if (kDebugMode) {
-          debugPrint(
-            'AssistDiag CONTROLLER_FAILURE reason=observation_rejected',
-          );
-          debugPrint('AssistDiag FINAL_RESULT kind=rejected');
-        }
-        notifyListeners();
-        return true;
-
-      case ReferenceMatchKind.adjusted:
-        _isVerifying = false;
-        _syncReferencePitch(adjustment.referenceFrequencyHz);
-        if (kDebugMode) {
-          debugPrint(
-            'AssistDiag adjusted '
-            '${previousPitch.label} → ${_referencePitch.label} '
-            '(${previousHz.toStringAsFixed(1)} → '
-            '${adjustment.referenceFrequencyHz.toStringAsFixed(1)} Hz)',
-          );
-          debugPrint(
-            'AssistDiag FINAL_RESULT kind=adjusted '
-            'uiReferencePitch=${_referencePitch.label}',
-          );
-        }
-        notifyListeners();
-        _setPhase(AssistUiPhase.showingTransition);
-        await _awaitPhase(timing.transitionDuration, generation);
-        return _isActive(generation);
-
-      case ReferenceMatchKind.converged:
-        return _handleConverged(generation, adjustment);
-
-      case ReferenceMatchKind.atBoundary:
-        // At the supported range edge but still far from the user is NOT a
-        // successful Shruti match — do not confirm the stuck reference.
-        final distance = adjustment.centsFromReference?.abs();
-        final closeEnough =
-            distance != null &&
-            distance <= _pitchAdjuster.convergenceToleranceCents;
-        if (kDebugMode) {
-          debugPrint(
-            'AssistDiag atBoundary closeEnough=$closeEnough '
-            'distanceCents=${distance?.toStringAsFixed(1) ?? "n/a"} '
-            'stuckRef=${_referencePitch.label}',
-          );
-        }
-        if (closeEnough) {
-          return _handleConverged(generation, adjustment);
-        }
-        _setPhase(AssistUiPhase.retry);
-        if (kDebugMode) {
-          debugPrint(
-            'AssistDiag CONTROLLER_FAILURE reason=at_boundary_far_from_user',
-          );
-          debugPrint('AssistDiag FINAL_RESULT kind=atBoundary');
-        }
-        notifyListeners();
-        return true;
+    final nearest = nearestSupportedShruti(observation.frequencyHz);
+    if (nearest == null) {
+      _failListenCapture(reason: 'no_supported_shruti');
+      notifyListeners();
+      return true;
     }
-  }
 
-  /// Close enough (or clamped at range edge): verify once, then enter Stage 2.
-  Future<bool> _handleConverged(
-    int generation,
-    ReferencePitchAdjustment adjustment,
-  ) async {
-    _syncReferencePitch(adjustment.referenceFrequencyHz);
-
-    if (_isVerifying) {
-      if (kDebugMode) {
-        debugPrint(
-          'AssistDiag STAGE1_CONFIRMED startingShruti=${_referencePitch.label} '
-          '→ entering Stage 2 range check',
-        );
-      }
-      _isVerifying = false;
-      _stopListenProgress();
-      _closeWindow();
-      return _beginStage2(generation);
-    }
+    // Starting point only — not the user's final Shruti.
+    _referencePitch = nearest.pitch;
+    _pitchAdjuster.start(nearest.frequencyHz);
 
     if (kDebugMode) {
       debugPrint(
-        'AssistDiag converged → verification; candidateRef='
-        '${_referencePitch.label}',
+        'AssistDiag detectedVoiceHz='
+        '${observation.frequencyHz.toStringAsFixed(1)}',
+      );
+      debugPrint('AssistDiag detectedVoiceNote=${observation.pitch.label}');
+      debugPrint(
+        'AssistDiag startingPointCandidate=${nearest.pitch.label} '
+        '(not final Shruti)',
+      );
+      debugPrint(
+        'AssistDiag startingPointHz='
+        '${nearest.frequencyHz.toStringAsFixed(1)}',
       );
     }
-    _isVerifying = true;
+
+    // Brief "Got it" acknowledgment before Stage 2.
+    if (_uiPhase != AssistUiPhase.processing) {
+      _setPhase(AssistUiPhase.processing);
+    }
     notifyListeners();
-    _setPhase(AssistUiPhase.showingTransition);
     await _awaitPhase(timing.transitionDuration, generation);
-    return _isActive(generation);
+    if (!_isActive(generation)) {
+      return false;
+    }
+
+    return _beginStage2(generation);
   }
 
-  /// Locks Stage 1 result and begins the guided 3-point range check.
+  /// Locks Stage 1 starting candidate and begins the guided 3-point range check.
   Future<bool> _beginStage2(int generation) async {
     _stage = AssistStage.exploringRange;
     _stage1Shruti = _referencePitch;
     _testedCandidates.clear();
     _lastComfortableShruti = null;
     _currentBoundaryShruti = null;
+    _searchMode = AssistShrutiSearchMode.initial;
+    _lowerSideAccessible = false;
     _prepareCandidate(_referencePitch);
 
     _setPhase(AssistUiPhase.startingPointFound);
@@ -854,8 +840,7 @@ class AssistModeController extends ChangeNotifier {
     _rangeMatchAccepted = false;
     _rangeVoiceHz = null;
 
-    // 1) PLAY — synthesized reference on, analysis off. Stage 1 Tanpura path
-    // is not used for range targets (frequency is the source of truth).
+    // 1) PLAY — synthesized reference on, analysis off.
     _setPhase(AssistUiPhase.playingReference);
     _disablePitchAnalysis();
     await _safeStopDetection();
@@ -961,6 +946,17 @@ class AssistModeController extends ChangeNotifier {
     switch (point) {
       case AssistRangePoint.lowerSa:
         result?.lowerSaMatched = true;
+        if (_shouldSkipLowerAudibilityQuestion) {
+          // Climbing: lower side already proven — keep Lower Sa → Pa → Upper
+          // Sa audio, but do not re-ask audibility.
+          result?.lowerSaAudible = true;
+          _currentRangePoint = AssistRangePoint.pa;
+          _rangeMatchAccepted = false;
+          _rangeVoiceHz = null;
+          _setPhase(AssistUiPhase.showingTransition);
+          await _awaitPhase(timing.transitionDuration, generation);
+          return _isActive(generation);
+        }
         _setPhase(AssistUiPhase.awaitingLowerAudibility);
         notifyListeners();
         return true;
@@ -980,9 +976,15 @@ class AssistModeController extends ChangeNotifier {
     }
   }
 
-  /// Advances to the next higher Shruti, or finishes when none remain.
-  Future<void> _moveToNextCandidateOrFinish(
+  /// Skip the Lower Sa question while climbing after a prior audible Lower Sa.
+  bool get _shouldSkipLowerAudibilityQuestion =>
+      _lowerSideAccessible &&
+      _searchMode == AssistShrutiSearchMode.climbing;
+
+  /// Moves one Shruti up or down, or finishes / unresolved at supported edges.
+  Future<void> _advanceCandidateOrFinish(
     int generation, {
+    required bool upward,
     bool alreadyShowingExploringNext = false,
   }) async {
     final current = _currentCandidate;
@@ -990,18 +992,28 @@ class AssistModeController extends ChangeNotifier {
       return;
     }
 
-    final next = nextHigherSupportedShruti(current);
+    final next = upward
+        ? nextHigherSupportedShruti(current)
+        : nextLowerSupportedShruti(current);
+
     if (next == null) {
-      // Top of supported range — recommend last comfortable only (usually
-      // the current candidate, just marked comfortable by the caller).
-      final recommended = _lastComfortableShruti;
-      if (recommended == null) {
-        _currentBoundaryShruti ??= current;
-        _setPhase(AssistUiPhase.rangeUnresolved);
-        notifyListeners();
+      if (upward) {
+        // Top of supported range — finish with last comfortable if any.
+        final recommended = _lastComfortableShruti;
+        if (recommended == null) {
+          _currentBoundaryShruti ??= current;
+          _setPhase(AssistUiPhase.rangeUnresolved);
+          notifyListeners();
+          return;
+        }
+        await _completeRangeTest(recommended);
         return;
       }
-      await _completeRangeTest(recommended);
+
+      // Bottom of supported range while seeking lower — unresolved.
+      _currentBoundaryShruti ??= current;
+      _setPhase(AssistUiPhase.rangeUnresolved);
+      notifyListeners();
       return;
     }
 
@@ -1017,8 +1029,9 @@ class AssistModeController extends ChangeNotifier {
 
     if (kDebugMode) {
       debugPrint(
-        'AssistDiag EXPLORE_NEXT candidate=${next.label} '
-        'from=${current.label}',
+        'AssistDiag EXPLORE_${upward ? "HIGHER" : "LOWER"} '
+        'candidate=${next.label} from=${current.label} '
+        'mode=${_searchMode.name}',
       );
     }
 
@@ -1072,47 +1085,9 @@ class AssistModeController extends ChangeNotifier {
     _activeCandidateResult = null;
     _lastComfortableShruti = null;
     _currentBoundaryShruti = null;
+    _searchMode = AssistShrutiSearchMode.initial;
+    _lowerSideAccessible = false;
     _targetMatcher.stop();
-  }
-
-  void _syncReferencePitch(double referenceHz) {
-    final nextPitch = noteFromFrequency(referenceHz);
-    if (nextPitch != null) {
-      _referencePitch = nextPitch;
-    }
-  }
-
-  /// Seeds the reference from the first stable voice pitch instead of walking
-  /// chromatically from the hardcoded session start (typically C).
-  ///
-  /// Does not confirm Shruti — only replaces the initial search candidate.
-  /// Subsequent observe / verify / adjust behavior is unchanged.
-  void _applyInitialShrutiCandidateIfNeeded(StablePitchCandidate observation) {
-    if (_didApplyInitialShrutiCandidate || _isVerifying) {
-      return;
-    }
-    _didApplyInitialShrutiCandidate = true;
-
-    final initial = nearestSupportedShruti(observation.frequencyHz);
-    if (initial == null) {
-      return;
-    }
-
-    if (kDebugMode) {
-      debugPrint(
-        'AssistDiag detectedVoiceHz='
-        '${observation.frequencyHz.toStringAsFixed(1)}',
-      );
-      debugPrint('AssistDiag detectedVoiceNote=${observation.pitch.label}');
-      debugPrint('AssistDiag initialShrutiCandidate=${initial.pitch.label}');
-      debugPrint(
-        'AssistDiag initialShrutiCandidateHz='
-        '${initial.frequencyHz.toStringAsFixed(1)}',
-      );
-    }
-
-    _referencePitch = initial.pitch;
-    _pitchAdjuster.start(initial.frequencyHz);
   }
 
   bool _isActive(int generation) =>
@@ -1300,31 +1275,6 @@ class AssistModeController extends ChangeNotifier {
     return true;
   }
 
-  void _logCycleDecision({
-    required Pitch previousPitch,
-    required double previousHz,
-    required StablePitchCandidate observation,
-    required ReferencePitchAdjustment adjustment,
-  }) {
-    if (!kDebugMode) {
-      return;
-    }
-    final adjNote = noteFromFrequency(adjustment.referenceFrequencyHz)?.label;
-    debugPrint(
-      'AssistDiag cycle=$_currentRound '
-      'verifying=$_isVerifying '
-      'refBefore=${previousPitch.label}@${previousHz.toStringAsFixed(1)}Hz '
-      'stableCandidate=${observation.pitch.label}@'
-      '${observation.frequencyHz.toStringAsFixed(1)}Hz '
-      '(n=${observation.stableSampleCount}) '
-      'cents=${adjustment.centsFromReference?.toStringAsFixed(1) ?? "n/a"} '
-      'kind=${adjustment.kind.name} '
-      'refAfter=${adjNote ?? "?"}@'
-      '${adjustment.referenceFrequencyHz.toStringAsFixed(1)}Hz '
-      'uiReferencePitch=${_referencePitch.label}',
-    );
-  }
-
   void _startListenProgress(int generation) {
     _stopListenProgress();
     _listenProgress = 0;
@@ -1405,13 +1355,11 @@ class AssistModeController extends ChangeNotifier {
     _stopListenProgress();
     _disablePitchAnalysis();
     _isSessionActive = false;
-    _isVerifying = false;
     _clearListenCapture();
     _clearStage2State();
     _uiPhase = AssistUiPhase.intro;
     _currentRound = 0;
     _listenProgress = 0;
-    _didApplyInitialShrutiCandidate = false;
     _referencePitch = initialReferencePitch;
     await _readingsSubscription?.cancel();
     _readingsSubscription = null;

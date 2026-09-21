@@ -9,7 +9,6 @@ import 'package:harmony/pitch/frequency_to_note.dart';
 import 'package:harmony/pitch/nearest_supported_shruti.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
-import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
@@ -119,7 +118,6 @@ void main() {
     required Future<void> Function(Duration duration) wait,
     FakeAudioService? audio,
     AssistTimingConfig timing = fastTiming,
-    ReferencePitchAdjuster? pitchAdjuster,
     TargetPitchMatcher? targetMatcher,
     Pitch initialReferencePitch = Pitch.c,
   }) {
@@ -127,7 +125,6 @@ void main() {
       detectionService: service,
       audioService: audio ?? audioService,
       candidateFinder: buildFinder(),
-      pitchAdjuster: pitchAdjuster,
       targetMatcher: targetMatcher ?? buildMatcher(),
       referenceSoundGenerator: referenceSound,
       timing: timing,
@@ -174,20 +171,24 @@ void main() {
     expect(controller.isPitchAnalysisEnabled, isFalse);
   });
 
-  test('playback phase does not perform pitch analysis', () async {
+  test('Assist Mode starts without playing Tanpura', () async {
     late final AssistModeController controller;
-    var analysisDuringPlay = true;
-    var micListeningDuringPlay = true;
+    var tanpuraPlayedDuringStage1 = false;
+    var sawStage1Listening = false;
 
     controller = buildController(
       service: detectionService,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.playingReference) {
-            analysisDuringPlay = controller.isPitchAnalysisEnabled;
-            micListeningDuringPlay = detectionService.isListening;
-            await controller.stopSession();
+          if (!controller.isExploringRange) {
+            if (audioService.isPlaying || audioService.loadCount > 0) {
+              tanpuraPlayedDuringStage1 = true;
+            }
+            if (phase == AssistUiPhase.listening) {
+              sawStage1Listening = true;
+              await emitPitch(detectionService, Pitch.g);
+            }
           }
         },
       ),
@@ -195,52 +196,28 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
-    expect(analysisDuringPlay, isFalse);
-    expect(micListeningDuringPlay, isFalse);
-    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(sawStage1Listening, isTrue);
+    expect(tanpuraPlayedDuringStage1, isFalse);
+    expect(controller.stage, AssistStage.exploringRange);
+    expect(controller.stage1Shruti, Pitch.g);
   });
 
-  test('Tanpura stops before listening begins', () async {
+  test('initial discovery listens directly to the microphone', () async {
     late final AssistModeController controller;
-    var playingDuringSettle = true;
-    var playingDuringListen = true;
+    var micOnDuringStage1Listen = false;
+    var analysisOnDuringStage1Listen = false;
+    var referencePlayingDuringStage1Listen = false;
 
     controller = buildController(
       service: detectionService,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.preparingToListen) {
-            playingDuringSettle = audioService.isPlaying;
-          }
-          if (phase == AssistUiPhase.listening) {
-            playingDuringListen = audioService.isPlaying;
-            await controller.stopSession();
-          }
-        },
-      ),
-    );
-    addTearDown(controller.dispose);
-
-    await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
-
-    expect(playingDuringSettle, isFalse);
-    expect(playingDuringListen, isFalse);
-  });
-
-  test('far user pitch causes adjustment', () async {
-    late final AssistModeController controller;
-    final startHz = frequencyHzForPitch(Pitch.c);
-
-    controller = buildController(
-      service: detectionService,
-      wait: phasedWait(
-        () => controller,
-        onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            micOnDuringStage1Listen = detectionService.isListening;
+            analysisOnDuringStage1Listen = controller.isPitchAnalysisEnabled;
+            referencePlayingDuringStage1Listen = controller.isReferencePlaying;
             await emitPitch(detectionService, Pitch.e);
           }
         },
@@ -249,67 +226,37 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
-    expect(controller.referenceFrequencyHz, isNot(closeTo(startHz, 0.5)));
-    expect(controller.referencePitch, isNot(Pitch.c));
+    expect(micOnDuringStage1Listen, isTrue);
+    expect(analysisOnDuringStage1Listen, isTrue);
+    expect(referencePlayingDuringStage1Listen, isFalse);
+    expect(controller.stage1Shruti, Pitch.e);
   });
 
-  test(
-    'first stable voice pitch seeds nearest Shruti instead of walking from C',
-    () async {
-      late final AssistModeController controller;
-      var listenCount = 0;
-      Pitch? pitchAfterFirstListen;
-      double? hzAfterFirstListen;
+  test('no reference audio is played during initial discovery', () async {
+    late final AssistModeController controller;
+    var audioPlayingInStage1 = false;
+    var synthPlayingInStage1 = false;
+    var sawPlayingReferenceInStage1 = false;
 
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.c,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (!controller.isExploringRange) {
+            if (phase == AssistUiPhase.playingReference) {
+              sawPlayingReferenceInStage1 = true;
+            }
+            if (audioService.isPlaying) {
+              audioPlayingInStage1 = true;
+            }
+            if (referenceSound.isPlaying) {
+              synthPlayingInStage1 = true;
+            }
             if (phase == AssistUiPhase.listening) {
-              listenCount += 1;
-              await emitHz(detectionService, 220);
+              await emitPitch(detectionService, Pitch.d);
             }
-            if (phase == AssistUiPhase.showingTransition &&
-                pitchAfterFirstListen == null) {
-              pitchAfterFirstListen = controller.referencePitch;
-              hzAfterFirstListen = controller.referenceFrequencyHz;
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
-
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
-
-      expect(pitchAfterFirstListen, Pitch.a);
-      expect(hzAfterFirstListen, closeTo(frequencyHzForPitch(Pitch.a), 0.5));
-      expect(controller.uiPhase, AssistUiPhase.completed);
-      expect(controller.referencePitch, Pitch.a);
-      // Converge + verify — no chromatic walk C→C#→…→A.
-      expect(listenCount, 8); // Stage1×2 + first candidate×3 + next×3
-    },
-  );
-
-  test('within tolerance does not adjust and enters verification', () async {
-    late final AssistModeController controller;
-    var sawVerifying = false;
-    final startHz = frequencyHzForPitch(Pitch.c);
-
-    controller = buildController(
-      service: detectionService,
-      wait: phasedWait(
-        () => controller,
-        onPhase: (phase) async {
-          if (phase == AssistUiPhase.verifying) {
-            sawVerifying = true;
-          }
-          if (phase == AssistUiPhase.listening) {
-            await emitPitch(detectionService, Pitch.c);
           }
         },
       ),
@@ -317,26 +264,27 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
-    expect(sawVerifying, isTrue);
-    expect(controller.uiPhase, AssistUiPhase.completed);
-    expect(controller.referenceFrequencyHz, closeTo(startHz, 0.5));
-    expect(controller.referencePitch, Pitch.c);
+    expect(sawPlayingReferenceInStage1, isFalse);
+    expect(audioPlayingInStage1, isFalse);
+    expect(synthPlayingInStage1, isFalse);
+    expect(controller.isExploringRange, isTrue);
   });
 
-  test('successful verification completes the session', () async {
+  test('stable voice candidate is accepted and mapped to nearest Shruti',
+      () async {
     late final AssistModeController controller;
-    var listenCount = 0;
+    // ~196 Hz ≈ G3.
+    const voiceHz = 196.0;
+    final expected = nearestSupportedShruti(voiceHz);
 
     controller = buildController(
       service: detectionService,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
-            listenCount += 1;
-            await emitPitch(detectionService, Pitch.c);
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            await emitHz(detectionService, voiceHz);
           }
         },
       ),
@@ -344,10 +292,104 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
-    expect(listenCount, 8); // Stage1×2 + first candidate×3 + next×3
-    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(expected, isNotNull);
+    expect(expected!.pitch, Pitch.g);
+    expect(controller.stage1Shruti, Pitch.g);
+    expect(controller.referencePitch, Pitch.g);
+    expect(controller.currentExploreCandidate, Pitch.g);
+    expect(controller.stage, AssistStage.exploringRange);
+    // Starting point only — not a completed final Shruti.
+    expect(controller.uiPhase, isNot(AssistUiPhase.completed));
+  });
+
+  test('detected Shruti is only a Stage 2 starting point, not final', () async {
+    late final AssistModeController controller;
+    Pitch? stage1AtEntry;
+    var completedImmediatelyAfterStage1 = false;
+
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            await emitPitch(detectionService, Pitch.a);
+          }
+          if (phase == AssistUiPhase.startingPointFound) {
+            stage1AtEntry = controller.stage1Shruti;
+            completedImmediatelyAfterStage1 =
+                controller.uiPhase == AssistUiPhase.completed;
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(stage1AtEntry, Pitch.a);
+    expect(completedImmediatelyAfterStage1, isFalse);
+    expect(controller.isExploringRange, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.lastComfortableShruti, isNull);
+  });
+
+  test('initial discovery transitions into existing Stage 2', () async {
+    late final AssistModeController controller;
+    final phases = <AssistUiPhase>[];
+
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          phases.add(phase);
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            await emitPitch(detectionService, Pitch.f);
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(phases, contains(AssistUiPhase.listening));
+    expect(phases, contains(AssistUiPhase.processing));
+    expect(phases, contains(AssistUiPhase.startingPointFound));
+    expect(controller.stage, AssistStage.exploringRange);
+    expect(controller.stage1Shruti, Pitch.f);
+    expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
+    expect(controller.rangeTargets, isNotNull);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+  });
+
+  test('one stable Stage 1 listen is enough to enter Stage 2', () async {
+    late final AssistModeController controller;
+    var stage1ListenCount = 0;
+
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening) {
+            if (!controller.isExploringRange) {
+              stage1ListenCount += 1;
+              await emitPitch(detectionService, Pitch.c);
+            }
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(stage1ListenCount, 1);
+    expect(controller.stage1Shruti, Pitch.c);
+    expect(controller.isExploringRange, isTrue);
     expect(controller.isVerifying, isFalse);
   });
 
@@ -359,12 +401,11 @@ void main() {
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.d);
           }
         },
       ),
-      initialReferencePitch: Pitch.d,
     );
     addTearDown(controller.dispose);
 
@@ -378,90 +419,14 @@ void main() {
     expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.d));
   });
 
-  test('failed verification returns to adjustment', () async {
-    late final AssistModeController controller;
-    var listenCount = 0;
-    var sawAdjustAfterVerify = false;
-    double? hzAfterFirstConverge;
-
-    controller = buildController(
-      service: detectionService,
-      pitchAdjuster: ReferencePitchAdjuster(
-        convergenceToleranceCents: 50,
-        hysteresisCents: 0,
-        maxStepCents: 100,
-      ),
-      wait: phasedWait(
-        () => controller,
-        onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
-            listenCount += 1;
-            if (listenCount == 1) {
-              // Match C → converge → enter verify.
-              await emitPitch(detectionService, Pitch.c);
-            } else if (listenCount == 2) {
-              // Verify fails: sing far from C.
-              hzAfterFirstConverge = controller.referenceFrequencyHz;
-              await emitPitch(detectionService, Pitch.e);
-            } else {
-              // Continue toward E until done.
-              await emitPitch(detectionService, Pitch.e);
-              if (controller.referenceFrequencyHz != hzAfterFirstConverge) {
-                sawAdjustAfterVerify = true;
-              }
-            }
-          }
-        },
-      ),
-    );
-    addTearDown(controller.dispose);
-
-    await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
-
-    expect(sawAdjustAfterVerify, isTrue);
-    expect(controller.uiPhase, AssistUiPhase.completed);
-    expect(controller.referencePitch, isNot(Pitch.c));
-  });
-
-  test('repeated identical user pitch eventually completes', () async {
-    late final AssistModeController controller;
-    var listenCount = 0;
-
-    controller = buildController(
-      service: detectionService,
-      initialReferencePitch: Pitch.c,
-      wait: phasedWait(
-        () => controller,
-        onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
-            listenCount += 1;
-            // Always the same comfortable note.
-            await emitPitch(detectionService, Pitch.e);
-          }
-        },
-      ),
-    );
-    addTearDown(controller.dispose);
-
-    await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
-
-    expect(controller.uiPhase, AssistUiPhase.completed);
-    expect(controller.referencePitch, Pitch.e);
-    expect(listenCount, lessThan(20));
-    expect(controller.isVerifying, isFalse);
-  });
-
-  test('stable C input confirms C', () async {
+  test('stable C input becomes Stage 2 starting point C', () async {
     late final AssistModeController controller;
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.c);
           }
         },
@@ -476,15 +441,14 @@ void main() {
     expect(controller.referencePitch, Pitch.c);
   });
 
-  test('stable C# input confirms C#', () async {
+  test('stable C# input becomes Stage 2 starting point C#', () async {
     late final AssistModeController controller;
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.cSharp);
           }
         },
@@ -499,15 +463,14 @@ void main() {
     expect(controller.referencePitch, Pitch.cSharp);
   });
 
-  test('stable E input confirms E', () async {
+  test('stable E input becomes Stage 2 starting point E', () async {
     late final AssistModeController controller;
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.e);
           }
         },
@@ -520,80 +483,34 @@ void main() {
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.e);
-    expect(
-      controller.referenceFrequencyHz,
-      closeTo(frequencyHzForPitch(Pitch.e), 1.0),
-    );
   });
 
-  test(
-    'atBoundary while far from user does not confirm the stuck reference',
-    () async {
-      late final AssistModeController controller;
-      final maxHz = frequencyHzForPitch(Pitch.b);
-      final aboveMax = maxHz * math.pow(2, 150 / 1200).toDouble();
-      var listenCount = 0;
+  test('220 Hz voice maps to A as Stage 2 starting point', () async {
+    late final AssistModeController controller;
 
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.b,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              listenCount += 1;
-              if (listenCount == 1) {
-                // Seed initial candidate at B, then enter verification.
-                await emitPitch(detectionService, Pitch.b);
-              } else {
-                // Verification: still far above the supported ceiling.
-                await emitHz(detectionService, aboveMax);
-              }
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            await emitHz(detectionService, 220);
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
 
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
+    await controller.startSession();
+    await finishStage2WithoutClimbing(controller);
 
-      // Far from user at the range edge must not be treated as "found Shruti".
-      expect(controller.uiPhase, AssistUiPhase.retry);
-      expect(controller.referencePitch, Pitch.b);
-      expect(controller.referenceFrequencyHz, closeTo(maxHz, 0.01));
-    },
-  );
-
-  test(
-    'stable A against default C adjusts upward (not false steady-note failure)',
-    () async {
-      late final AssistModeController controller;
-      final aHz = frequencyHzForPitch(Pitch.a);
-
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.c,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              await emitHz(detectionService, aHz);
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
-
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
-
-      // Must converge on A — not retry via atBoundary-at-C from octave folding.
-      expect(controller.uiPhase, AssistUiPhase.completed);
-      expect(controller.referencePitch, Pitch.a);
-      expect(controller.referenceFrequencyHz, closeTo(aHz, 1.0));
-    },
-  );
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+    expect(
+      controller.referenceFrequencyHz,
+      closeTo(frequencyHzForPitch(Pitch.a), 0.5),
+    );
+  });
 
   test('candidate accepted before timeout yields success', () async {
     late final AssistModeController controller;
@@ -601,12 +518,11 @@ void main() {
 
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
           phases.add(phase);
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.d);
           }
         },
@@ -629,13 +545,11 @@ void main() {
 
       controller = buildController(
         service: detectionService,
-        initialReferencePitch: Pitch.c,
         wait: phasedWait(
           () => controller,
           onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              // Candidate latch + listen-window end happen in one turn.
-              // stop()-style none must not overwrite success into retry.
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
               await emitPitch(detectionService, Pitch.e);
               detectionService.emit(PitchReading.none);
             }
@@ -652,7 +566,7 @@ void main() {
     },
   );
 
-  test('timeout before candidate yields failure', () async {
+  test('timeout before candidate yields retry', () async {
     late final AssistModeController controller;
 
     controller = buildController(
@@ -669,154 +583,13 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
-    expect(controller.referencePitch, Pitch.c);
+    expect(controller.stage, AssistStage.findingStart);
+    expect(controller.stage1Shruti, isNull);
   });
 
-  test(
-    'accepted candidate is not overwritten by stop/none failure path',
-    () async {
-      late final AssistModeController controller;
-      final aHz = frequencyHzForPitch(Pitch.a);
-
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.c,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              await emitHz(detectionService, aHz);
-              // FakePitchDetectionService.stop() emits none after listen;
-              // that must not clear the latched candidate into retry.
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
-
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
-
-      expect(controller.uiPhase, isNot(AssistUiPhase.retry));
-      expect(detectionService.stopCount, greaterThan(0));
-      expect(
-        controller.referenceFrequencyHz,
-        greaterThan(frequencyHzForPitch(Pitch.c)),
-      );
-    },
-  );
-
-  test(
-    'successful candidate reaches controller state with correct note/frequency',
-    () async {
-      late final AssistModeController controller;
-      final eHz = frequencyHzForPitch(Pitch.e);
-      Pitch? pitchAfterFirstAdjust;
-      double? hzAfterFirstAdjust;
-
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.c,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              await emitHz(detectionService, eHz);
-            }
-            if (phase == AssistUiPhase.showingTransition &&
-                pitchAfterFirstAdjust == null) {
-              pitchAfterFirstAdjust = controller.referencePitch;
-              hzAfterFirstAdjust = controller.referenceFrequencyHz;
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
-
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
-
-      expect(pitchAfterFirstAdjust, isNotNull);
-      expect(pitchAfterFirstAdjust, isNot(Pitch.c));
-      expect(hzAfterFirstAdjust, isNotNull);
-      expect(hzAfterFirstAdjust, greaterThan(frequencyHzForPitch(Pitch.c)));
-      expect(hzAfterFirstAdjust, lessThanOrEqualTo(eHz + 0.5));
-      expect(controller.uiPhase, isNot(AssistUiPhase.retry));
-    },
-  );
-
-  test(
-    'low detected F0 below C does not confirm default C as Shruti',
-    () async {
-      late final AssistModeController controller;
-      // Below C3: octave-folds into the Sa band near A#/B — smart start must
-      // not leave the session stuck on the hardcoded default C.
-      final belowC = frequencyHzForPitch(Pitch.c) * math.pow(2, -150 / 1200);
-      final expected = nearestSupportedShruti(belowC.toDouble());
-
-      controller = buildController(
-        service: detectionService,
-        initialReferencePitch: Pitch.c,
-        wait: phasedWait(
-          () => controller,
-          onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
-              await emitHz(detectionService, belowC.toDouble());
-            }
-          },
-        ),
-      );
-      addTearDown(controller.dispose);
-
-      await controller.startSession();
-      await finishStage2WithoutClimbing(controller);
-
-      expect(expected, isNotNull);
-      expect(controller.referencePitch, isNot(Pitch.c));
-      expect(controller.referencePitch, expected!.pitch);
-    },
-  );
-
-  test('tiny pitch differences do not cause endless adjustment', () async {
-    late final AssistModeController controller;
-    var listenCount = 0;
-    final ref = frequencyHzForPitch(Pitch.d);
-
-    controller = buildController(
-      service: detectionService,
-      initialReferencePitch: Pitch.d,
-      pitchAdjuster: ReferencePitchAdjuster(
-        convergenceToleranceCents: 50,
-        hysteresisCents: 20,
-        maxStepCents: 100,
-      ),
-      wait: phasedWait(
-        () => controller,
-        onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening &&
-              !controller.isExploringRange) {
-            listenCount += 1;
-            final wobbleCents = listenCount.isEven ? 15.0 : -18.0;
-            final hz = ref * math.pow(2, wobbleCents / 1200).toDouble();
-            await emitHz(detectionService, hz);
-          }
-        },
-      ),
-    );
-    addTearDown(controller.dispose);
-
-    await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
-
-    expect(controller.uiPhase, AssistUiPhase.completed);
-    expect(controller.referencePitch, Pitch.d);
-    expect(listenCount, 2);
-  });
-
-  test('silence never changes the reference and yields retry', () async {
+  test('silence never accepts a starting point and yields retry', () async {
     late final AssistModeController controller;
 
     controller = buildController(
@@ -834,14 +607,12 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
-    expect(controller.referencePitch, Pitch.c);
-    expect(controller.referenceFrequencyHz, frequencyHzForPitch(Pitch.c));
+    expect(controller.stage1Shruti, isNull);
   });
 
-  test('invalid pitch never changes the reference', () async {
+  test('invalid pitch yields retry', () async {
     late final AssistModeController controller;
 
     controller = buildController(
@@ -863,13 +634,12 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
-    expect(controller.referencePitch, Pitch.c);
+    expect(controller.stage1Shruti, isNull);
   });
 
-  test('unstable pitch never changes the reference', () async {
+  test('unstable pitch triggers retry', () async {
     late final AssistModeController controller;
 
     controller = buildController(
@@ -888,35 +658,28 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.retry);
-    expect(controller.referencePitch, Pitch.c);
+    expect(controller.stage1Shruti, isNull);
   });
 
-  test('reference cannot climb indefinitely past supported range', () async {
+  test('retry resets candidate finder and listens again', () async {
     late final AssistModeController controller;
-    final maxHz = frequencyHzForPitch(Pitch.b);
-    final aboveMax = maxHz * math.pow(2, 150 / 1200).toDouble();
-    final frequencies = <double>[];
-    var listenCount = 0;
+    var stage1ListenCount = 0;
 
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.b,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
-            listenCount += 1;
-            if (listenCount == 1) {
-              await emitPitch(detectionService, Pitch.b);
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
+            stage1ListenCount += 1;
+            if (stage1ListenCount == 1) {
+              // Unstable — force retry.
+              await emitPitch(detectionService, Pitch.d, count: 2);
+              await emitPitch(detectionService, Pitch.e, count: 2);
             } else {
-              await emitHz(detectionService, aboveMax);
-            }
-            final hz = controller.referenceFrequencyHz;
-            if (hz != null) {
-              frequencies.add(hz);
+              await emitPitch(detectionService, Pitch.g);
             }
           }
         },
@@ -925,12 +688,75 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
-
     expect(controller.uiPhase, AssistUiPhase.retry);
-    expect(controller.referenceFrequencyHz, closeTo(maxHz, 0.01));
-    expect(frequencies.every((hz) => hz <= maxHz + 0.01), isTrue);
+    expect(controller.stage1Shruti, isNull);
+    expect(stage1ListenCount, 1);
+
+    await controller.retryRound();
+
+    expect(stage1ListenCount, 2);
+    expect(controller.stage1Shruti, Pitch.g);
+    expect(controller.isExploringRange, isTrue);
   });
+
+  test(
+    'low detected F0 below C maps to nearest Shruti, not default C',
+    () async {
+      late final AssistModeController controller;
+      final belowC = frequencyHzForPitch(Pitch.c) * math.pow(2, -150 / 1200);
+      final expected = nearestSupportedShruti(belowC.toDouble());
+
+      controller = buildController(
+        service: detectionService,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
+              await emitHz(detectionService, belowC.toDouble());
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
+
+      expect(expected, isNotNull);
+      expect(controller.referencePitch, isNot(Pitch.c));
+      expect(controller.referencePitch, expected!.pitch);
+    },
+  );
+
+  test(
+    'accepted candidate is not overwritten by stop/none failure path',
+    () async {
+      late final AssistModeController controller;
+      final aHz = frequencyHzForPitch(Pitch.a);
+
+      controller = buildController(
+        service: detectionService,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
+              await emitHz(detectionService, aHz);
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
+
+      expect(controller.uiPhase, isNot(AssistUiPhase.retry));
+      expect(detectionService.stopCount, greaterThan(0));
+      expect(controller.referencePitch, Pitch.a);
+    },
+  );
 
   test('stopSession cancels timers and returns to intro', () async {
     late final AssistModeController controller;
@@ -947,7 +773,8 @@ void main() {
       wait: (duration) async {
         waitCalls += 1;
         if (waitCalls == 1) {
-          expect(controller.uiPhase, AssistUiPhase.playingReference);
+          expect(controller.uiPhase, AssistUiPhase.listening);
+          expect(controller.isExploringRange, isFalse);
           await controller.stopSession();
         }
       },
@@ -955,7 +782,6 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(controller.uiPhase, AssistUiPhase.intro);
     expect(controller.isSessionActive, isFalse);
@@ -965,7 +791,7 @@ void main() {
     expect(controller.currentRound, 0);
   });
 
-  test('reference cannot change during listening', () async {
+  test('reference pitch does not change during Stage 1 listening', () async {
     late final AssistModeController controller;
     Pitch? referenceWhileListening;
 
@@ -974,7 +800,7 @@ void main() {
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.e);
             referenceWhileListening = controller.referencePitch;
             await controller.stopSession();
@@ -985,7 +811,6 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await finishStage2WithoutClimbing(controller);
 
     expect(referenceWhileListening, Pitch.c);
   });
@@ -997,13 +822,12 @@ void main() {
 
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
           if (phase == AssistUiPhase.listening) {
             listenCount += 1;
-            if (!allowSecondSearch) {
+            if (!allowSecondSearch && !controller.isExploringRange) {
               await emitPitch(detectionService, Pitch.e);
             }
           }
@@ -1021,7 +845,6 @@ void main() {
 
     allowSecondSearch = true;
     final tryAgainFuture = controller.tryAgain();
-    // Let bootstrap finish; hold the new session on the first play window.
     await Future<void>.delayed(Duration.zero);
     await controller.stopSession();
     await tryAgainFuture;
@@ -1049,7 +872,7 @@ void main() {
         onPhase: (phase) async {
           phasesBySession.putIfAbsent(session, () => <AssistUiPhase>[]);
           phasesBySession[session]!.add(phase);
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             await emitPitch(detectionService, Pitch.d);
           }
         },
@@ -1069,6 +892,7 @@ void main() {
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(phasesBySession[1], isNotNull);
     expect(phasesBySession[1], contains(AssistUiPhase.listening));
+    // Stage 2 still plays reference tones after the new Stage 1 capture.
     expect(phasesBySession[1], contains(AssistUiPhase.playingReference));
   });
 
@@ -1081,16 +905,14 @@ void main() {
 
       controller = buildController(
         service: detectionService,
-        initialReferencePitch: Pitch.c,
         wait: phasedWait(
           () => controller,
           onPhase: (phase) async {
-            if (phase == AssistUiPhase.listening) {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
               if (pass == 0) {
                 await emitPitch(detectionService, Pitch.g);
               } else {
-                // Capture only the first listen of the restarted session, before
-                // smart-start / verification can update the reference.
                 pitchWhileListeningAfterRetry ??= controller.referencePitch;
                 await emitPitch(detectionService, Pitch.a);
               }
@@ -1115,22 +937,21 @@ void main() {
     },
   );
 
-  test('smart Shruti start still works after tryAgain', () async {
+  test('voice capture still works after tryAgain', () async {
     late final AssistModeController controller;
     var pass = 0;
-    var listenCountPass1 = 0;
+    var stage1ListenCountPass1 = 0;
 
     controller = buildController(
       service: detectionService,
-      initialReferencePitch: Pitch.c,
       wait: phasedWait(
         () => controller,
         onPhase: (phase) async {
-          if (phase == AssistUiPhase.listening) {
+          if (phase == AssistUiPhase.listening && !controller.isExploringRange) {
             if (pass == 0) {
               await emitPitch(detectionService, Pitch.e);
-            } else if (!controller.isExploringRange) {
-              listenCountPass1 += 1;
+            } else {
+              stage1ListenCountPass1 += 1;
               await emitHz(detectionService, 220);
             }
           }
@@ -1149,12 +970,7 @@ void main() {
 
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.a);
-    expect(
-      controller.referenceFrequencyHz,
-      closeTo(frequencyHzForPitch(Pitch.a), 0.5),
-    );
-    // Stage1 converge + verify for A after retry — no chromatic walk from C.
-    expect(listenCountPass1, 2);
+    expect(stage1ListenCountPass1, 1);
   });
 
   test(
@@ -1197,19 +1013,16 @@ void main() {
       expect(controller.uiPhase, AssistUiPhase.completed);
       expect(controller.referencePitch, Pitch.f);
 
-      // Hold new-session waits so we can complete an old gate after restart.
       releaseWaits = false;
       pendingWaits.clear();
       final tryAgainFuture = controller.tryAgain();
 
-      // Allow tryAgain to tear down and begin the new round loop.
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
       expect(controller.uiPhase, isNot(AssistUiPhase.completed));
       expect(controller.referencePitch, isNot(Pitch.f));
 
-      // Completing any leftover gates must not resurrect the old completion.
       for (final gate in List<Completer<void>>.from(pendingWaits)) {
         if (!gate.isCompleted) {
           gate.complete();

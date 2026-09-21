@@ -58,6 +58,29 @@ void main() {
       }
     });
 
+    test('Lower Sa tone keeps the fundamental clearly dominant', () {
+      final wav = buildReferenceToneWav(
+        frequencyHz: 130.81,
+        duration: const Duration(milliseconds: 900),
+      );
+      final energies = estimateHarmonicEnergies(wav, fundamentalHz: 130.81);
+      expect(energies, isNotNull);
+      final fundamental = energies![1]!;
+      final second = energies[2]!;
+      final third = energies[3]!;
+      final fourth = energies[4]!;
+
+      expect(fundamental, greaterThan(0));
+      // 2nd harmonic is present for warmth but well below the fundamental.
+      expect(second / fundamental, lessThan(0.45));
+      expect(second / fundamental, greaterThan(0.05));
+      // 3rd and 4th are strongly reduced vs the fundamental.
+      expect(third / fundamental, lessThan(0.12));
+      expect(fourth / fundamental, lessThan(0.08));
+      expect(third, lessThan(second));
+      expect(fourth, lessThan(third));
+    });
+
     test('identical frequency requests are deterministic', () {
       final a = buildReferenceToneWav(frequencyHz: 196.00);
       final b = buildReferenceToneWav(frequencyHz: 196.00);

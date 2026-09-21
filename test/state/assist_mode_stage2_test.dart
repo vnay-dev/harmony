@@ -160,7 +160,32 @@ void main() {
     }
   }
 
-  /// Answers Lower Yes so Pa / Upper Sa matching can continue.
+  /// Answers Lower Yes when asked, then waits until Upper Sa comfort is ready.
+  ///
+  /// While climbing, Lower Sa audibility is skipped — this still lands on
+  /// [AssistUiPhase.awaitingUpperComfort].
+  Future<void> reachUpperComfortQuestion(
+    AssistModeController controller,
+  ) async {
+    for (var i = 0; i < 64; i++) {
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.awaitingLowerAudibility) {
+        await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingUpperComfort) {
+        return;
+      } else if (phase == AssistUiPhase.completed ||
+          phase == AssistUiPhase.rangeUnresolved ||
+          phase == AssistUiPhase.rangeBoundaryReached ||
+          phase == AssistUiPhase.intro) {
+        fail('Stopped at $phase before Upper Sa comfort');
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    fail('Timed out waiting for Upper Sa comfort');
+  }
+
+  /// Answers Lower Yes so Pa / Upper Sa matching can continue (initial only).
   Future<void> answerLowerAudibleYes(AssistModeController controller) async {
     expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
     await controller.reportLowerSaAudible();
@@ -228,6 +253,36 @@ void main() {
     expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
   });
 
+  test('range guide target moves LOW → MID → HIGH with current point', () async {
+    final guideByPoint = <AssistRangePoint, double?>{};
+    final controller = buildRangeController(
+      // G wraps Pa into the next octave; marker must still leave LOW.
+      stage1Pitch: Pitch.g,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point != null) {
+          guideByPoint.putIfAbsent(point, () => c.rangeTargetGuidePosition);
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.rangeTargetGuidePosition, 0.0);
+    expect(guideByPoint[AssistRangePoint.lowerSa], 0.0);
+
+    await answerLowerAudibleYes(controller);
+
+    expect(guideByPoint[AssistRangePoint.pa], 0.5);
+    expect(guideByPoint[AssistRangePoint.upperSa], 1.0);
+    expect(controller.currentRangePoint, AssistRangePoint.upperSa);
+    expect(controller.rangeTargetGuidePosition, 1.0);
+  });
+
   test('Lower Sa = Yes continues to Pa', () async {
     final controller = buildRangeController(stage1Pitch: Pitch.c);
     addTearDown(controller.dispose);
@@ -275,7 +330,7 @@ void main() {
     expect(controller.lastComfortableShruti, isNull);
   });
 
-  test('Upper Sa = Comfortable explores the next Shruti', () async {
+  test('Upper Sa = Comfortable climbs and skips Lower Sa question', () async {
     final controller = buildRangeController(stage1Pitch: Pitch.c);
     addTearDown(controller.dispose);
 
@@ -287,8 +342,12 @@ void main() {
 
     expect(controller.lastComfortableShruti, Pitch.c);
     expect(controller.testedCandidates.first.upperSaComfortable, isTrue);
+    expect(controller.searchMode, AssistShrutiSearchMode.climbing);
     expect(controller.currentExploreCandidate, Pitch.cSharp);
-    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    // Climbing skips re-asking Lower Sa — lands on Upper Sa comfort.
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
   });
 
   test('C comfortable then C# strained → final Shruti is C', () async {
@@ -296,11 +355,11 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaComfortable();
     expect(controller.lastComfortableShruti, Pitch.c);
 
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     expect(controller.currentExploreCandidate, Pitch.cSharp);
     await controller.reportUpperSaStrained();
 
@@ -319,16 +378,16 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaComfortable();
     expect(controller.lastComfortableShruti, Pitch.c);
 
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaComfortable();
     expect(controller.lastComfortableShruti, Pitch.cSharp);
     expect(controller.currentExploreCandidate, Pitch.d);
 
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaStrained();
 
     expect(controller.currentBoundaryShruti, Pitch.d);
@@ -347,14 +406,14 @@ void main() {
 
     await controller.startSession();
     for (final _ in [Pitch.c, Pitch.cSharp, Pitch.d]) {
-      await answerLowerAudibleYes(controller);
+      await reachUpperComfortQuestion(controller);
       await controller.reportUpperSaComfortable();
       comfortable.add(controller.lastComfortableShruti!);
     }
     expect(comfortable, [Pitch.c, Pitch.cSharp, Pitch.d]);
     expect(controller.currentExploreCandidate, Pitch.dSharp);
 
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaStrained();
     await controller.acknowledgeRangeBoundary();
 
@@ -362,7 +421,7 @@ void main() {
     expect(controller.currentBoundaryShruti, Pitch.dSharp);
   });
 
-  test('first candidate strained leaves result unresolved', () async {
+  test('C Upper Sa strained with no lower Shruti → unresolved', () async {
     final controller = buildRangeController(stage1Pitch: Pitch.c);
     addTearDown(controller.dispose);
 
@@ -373,11 +432,165 @@ void main() {
     expect(controller.uiPhase, AssistUiPhase.rangeUnresolved);
     expect(controller.currentBoundaryShruti, Pitch.c);
     expect(controller.lastComfortableShruti, isNull);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
     expect(controller.uiPhase, isNot(AssistUiPhase.completed));
 
-    // Acknowledge must not apply from unresolved; tryAgain is the path.
     await controller.acknowledgeRangeBoundary();
     expect(controller.uiPhase, AssistUiPhase.rangeUnresolved);
+  });
+
+  // --- Product search examples ---
+
+  test('Example 1: G comfortable, G# comfortable, A strained → final G#',
+      () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.g);
+
+    await reachUpperComfortQuestion(controller);
+    expect(controller.currentExploreCandidate, Pitch.gSharp);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.gSharp);
+
+    await reachUpperComfortQuestion(controller);
+    expect(controller.currentExploreCandidate, Pitch.a);
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.gSharp);
+    expect(controller.currentBoundaryShruti, Pitch.a);
+  });
+
+  test('Example 2: G strained, F# comfortable → final F#', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.currentExploreCandidate, Pitch.fSharp);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.fSharp);
+    expect(controller.lastComfortableShruti, Pitch.fSharp);
+  });
+
+  test('Example 3: G too low, G# comfortable → final G#', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    await controller.reportLowerSaTooLow();
+
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.currentExploreCandidate, Pitch.gSharp);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.gSharp);
+  });
+
+  test('Example 4: G and G# too low, A comfortable → final A', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await controller.reportLowerSaTooLow();
+    expect(controller.currentExploreCandidate, Pitch.gSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+
+    await controller.reportLowerSaTooLow();
+    expect(controller.currentExploreCandidate, Pitch.a);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+  });
+
+  test('Example 5: G..A comfortable, A# strained → final A', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    for (final expected in [Pitch.g, Pitch.gSharp, Pitch.a]) {
+      await reachUpperComfortQuestion(controller);
+      expect(controller.currentExploreCandidate, expected);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, expected);
+    }
+
+    await reachUpperComfortQuestion(controller);
+    expect(controller.currentExploreCandidate, Pitch.aSharp);
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+    expect(controller.currentBoundaryShruti, Pitch.aSharp);
+  });
+
+  test('Example 6: C strained → seek lower only, no wrap', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.uiPhase, AssistUiPhase.rangeUnresolved);
+    expect(controller.currentExploreCandidate, Pitch.c);
+    expect(controller.testedCandidates.map((r) => r.shruti), [Pitch.c]);
+  });
+
+  test('Example 7: B comfortable → finish with B, no wrap to C', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.b);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.b);
+    expect(controller.lastComfortableShruti, Pitch.b);
+  });
+
+  test('Try Again resets search mode and candidate state', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+
+    await controller.tryAgain();
+
+    // Fresh Stage 2 session from the same Stage 1 pitch.
+    expect(controller.searchMode, AssistShrutiSearchMode.initial);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.currentBoundaryShruti, isNull);
+    expect(controller.stage1Shruti, Pitch.g);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.testedCandidates, hasLength(1));
   });
 
   test('strained candidate is never returned as final Shruti', () async {
@@ -385,9 +598,9 @@ void main() {
     addTearDown(controller.dispose);
 
     await controller.startSession();
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaComfortable();
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     final strained = controller.currentExploreCandidate!;
     await controller.reportUpperSaStrained();
     await controller.acknowledgeRangeBoundary();
@@ -804,7 +1017,7 @@ void main() {
     expect(controller.lastComfortableShruti, Pitch.e);
     expect(controller.testedCandidates, isNotEmpty);
 
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaStrained();
     expect(controller.currentBoundaryShruti, isNot(Pitch.e));
     await controller.acknowledgeRangeBoundary();
@@ -831,7 +1044,7 @@ void main() {
     await controller.startSession();
     await answerLowerAudibleYes(controller);
     await controller.reportUpperSaComfortable();
-    await answerLowerAudibleYes(controller);
+    await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaStrained();
     await controller.acknowledgeRangeBoundary();
 
