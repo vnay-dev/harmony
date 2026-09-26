@@ -5,6 +5,8 @@ class AssistTimingConfig {
     this.settlingDuration = const Duration(milliseconds: 600),
     this.listenDuration = const Duration(seconds: 6),
     this.transitionDuration = const Duration(seconds: 2),
+    this.countdownStepDuration = const Duration(seconds: 1),
+    this.assistedSingDuration,
   });
 
   /// How long a Stage 2 reference tone plays before singing.
@@ -18,6 +20,57 @@ class AssistTimingConfig {
 
   /// Brief pause after listening before the next reference plays.
   final Duration transitionDuration;
+
+  /// Duration for each spoken/visual countdown step (3, 2, 1).
+  final Duration countdownStepDuration;
+
+  /// How long the reference stays audible while the user sings along.
+  ///
+  /// Falls back to [listenDuration] when null so tests stay fast.
+  final Duration? assistedSingDuration;
+
+  /// Assisted sing-along length. Pitch matching stays off for this whole window.
+  Duration get assistedSingWindow => assistedSingDuration ?? listenDuration;
+}
+
+/// Which 3, 2, 1 lead-in the tutor should speak.
+enum AssistCountdownKind {
+  /// Solo turn: "Let's try singing it again in 3..."
+  soloRetry,
+
+  /// Sing-along turn: "Let's sing together in 3..."
+  singTogether,
+}
+
+/// Result of one assisted sing-along pass.
+enum AssistedSingResult {
+  /// Stop or a stale generation ended the pass.
+  stopped,
+
+  /// The practice window ended without a confirmed user match.
+  ///
+  /// This is the only result while the capture path cannot separate the
+  /// singer from the speaker. The timer is a bound, not evidence the user
+  /// learned the sound.
+  unconfirmed,
+
+  /// The user's voice was isolated from the speaker and held the target.
+  confirmed,
+}
+
+/// How a struggled range point is being taught.
+///
+/// These modes must stay distinct. Pitch matching is only valid in [normal]
+/// and [assistedVerification], never while the reference is still playing.
+enum AssistRecoveryMode {
+  /// Reference has stopped. The user sings alone and matching may succeed.
+  normal,
+
+  /// Reference is playing for the user to follow. Matching must not succeed.
+  assistedSinging,
+
+  /// Reference has stopped and the room is settling before solo verification.
+  assistedVerification,
 }
 
 /// Which Assist Mode stage is active.
@@ -49,14 +102,20 @@ enum AssistUiPhase {
   /// Pre-session introduction.
   intro,
 
+  /// Spoken + visual countdown before listening (3…2…1).
+  countdown,
+
   /// Reference tone is playing; pitch analysis is off (Stage 2).
   playingReference,
 
   /// Settling before mic analysis.
   preparingToListen,
 
-  /// User should sing; pitch analysis is on.
+  /// User should sing; pitch analysis is on. Reference audio is stopped.
   listening,
+
+  /// Reference stays audible so the user can sing along. Pitch matching is off.
+  assistedSinging,
 
   /// Listening ended; computing next step (no analysis).
   processing,

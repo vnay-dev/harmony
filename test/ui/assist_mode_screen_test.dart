@@ -12,11 +12,16 @@ import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/app_theme.dart';
+import 'package:harmony/tutor/tutor_session.dart';
+import 'package:harmony/tutor/tutor_speech_recognizer.dart';
+import 'package:harmony/tutor/tutor_timing.dart';
+import 'package:harmony/tutor/tutor_voice.dart';
 import 'package:harmony/ui/screens/assist_mode_screen.dart';
 
 import '../support/fake_audio_service.dart';
 import '../support/fake_pitch_detection_service.dart';
 import '../support/fake_reference_sound_generator.dart';
+import '../support/fake_tutor_voice.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -26,6 +31,7 @@ void main() {
     settlingDuration: Duration(milliseconds: 1),
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
+    countdownStepDuration: Duration.zero,
   );
 
   StablePitchCandidateFinder buildFinder() {
@@ -143,7 +149,7 @@ void main() {
     return controller;
   }
 
-  testWidgets('shows Assist introduction before Start', (tester) async {
+  testWidgets('shows welcome without requiring a Start tap', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -157,6 +163,10 @@ void main() {
           audioService: FakeAudioService(),
           candidateFinder: buildFinder(),
           referenceSoundGenerator: FakeReferenceSoundGenerator(),
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
           prepareAudioSession: () async {},
           wait: (_) async {},
         ),
@@ -164,16 +174,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Sing one comfortable note'), findsOneWidget);
-    expect(find.text('Hold it steady for a few seconds.'), findsOneWidget);
-    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('Find your comfortable Shruti'), findsOneWidget);
+    expect(find.text("I'll guide you. You just sing."), findsOneWidget);
+    expect(find.text('Start'), findsNothing);
     expect(find.textContaining('Hz'), findsNothing);
     expect(find.textContaining('cents'), findsNothing);
     expect(find.textContaining('Tanpura'), findsNothing);
-    expect(find.textContaining('Shruti'), findsNothing);
   });
 
-  testWidgets('Start enters listen phase without technical pitch details', (
+  testWidgets('session listens without technical pitch details', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -182,35 +191,51 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final holdListenPhase = Completer<void>();
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: FakePitchDetectionService(),
+      audioService: FakeAudioService(),
+      candidateFinder: buildFinder(),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
+      timing: const AssistTimingConfig(
+        referencePlayDuration: Duration(seconds: 30),
+        settlingDuration: Duration(seconds: 30),
+        listenDuration: Duration(seconds: 30),
+        transitionDuration: Duration(seconds: 30),
+        countdownStepDuration: Duration.zero,
+      ),
+      prepareAudioSession: () async {},
+      wait: (_) => holdListenPhase.future,
+    );
+    addTearDown(controller.dispose);
+
+    final tutor = TutorSession(
+      engine: controller,
+      voice: FakeTutorVoice(),
+      speechRecognizer: SilentTutorSpeechRecognizer(),
+      timing: const TutorTimingConfig.instant(),
+      wait: (_) async {},
+    );
+    addTearDown(tutor.dispose);
 
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.light(),
         home: AssistModeScreen(
-          detectionService: FakePitchDetectionService(),
-          audioService: FakeAudioService(),
-          candidateFinder: buildFinder(),
-          referenceSoundGenerator: FakeReferenceSoundGenerator(),
-          timing: const AssistTimingConfig(
-            referencePlayDuration: Duration(seconds: 30),
-            settlingDuration: Duration(seconds: 30),
-            listenDuration: Duration(seconds: 30),
-            transitionDuration: Duration(seconds: 30),
-          ),
-          prepareAudioSession: () async {},
-          wait: (_) => holdListenPhase.future,
+          controller: controller,
+          tutorSession: tutor,
+          autoBegin: false,
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Start'));
+    unawaited(controller.startSession());
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Sing one comfortable note'), findsWidgets);
-    expect(find.text('Hold it steady for a few seconds.'), findsOneWidget);
-    expect(find.textContaining('Round'), findsOneWidget);
+    expect(controller.uiPhase, AssistUiPhase.listening);
+    expect(find.text('Your turn'), findsOneWidget);
     expect(find.textContaining('Hz'), findsNothing);
     expect(find.textContaining('YIN'), findsNothing);
     expect(find.textContaining('cents'), findsNothing);
@@ -243,11 +268,18 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+          home: AssistModeScreen(
+            controller: controller,
+            tutorVoice: SilentTutorVoice(),
+            speechRecognizer: SilentTutorSpeechRecognizer(),
+            tutorTiming: const TutorTimingConfig.instant(),
+            autoBegin: false,
+          ),
         ),
       );
       await tester.pump();
 
+      expect(find.text('We found it'), findsOneWidget);
       expect(find.text('Your comfortable Shruti'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
@@ -315,15 +347,20 @@ void main() {
                       onPressed: () async {
                         final pitch = await Navigator.of(context).push<Pitch>(
                           MaterialPageRoute<Pitch>(
-                            builder: (_) =>
-                                AssistModeScreen(controller: assistController),
+                            builder: (_) => AssistModeScreen(
+                              controller: assistController,
+                              tutorVoice: SilentTutorVoice(),
+                              speechRecognizer: SilentTutorSpeechRecognizer(),
+                              tutorTiming: const TutorTimingConfig.instant(),
+                              autoBegin: false,
+                            ),
                           ),
                         );
                         if (pitch != null) {
                           await drone.playPitch(pitch);
                         }
                       },
-                      child: const Text('Assist Mode'),
+                      child: const Text('Find My Shruti'),
                     ),
                   ],
                 ),
@@ -336,7 +373,7 @@ void main() {
 
       expect(find.text(Pitch.d.label), findsOneWidget);
 
-      await tester.tap(find.text('Assist Mode'));
+      await tester.tap(find.text('Find My Shruti'));
       await tester.pumpAndSettle();
 
       expect(find.text('Play My Shruti'), findsOneWidget);
@@ -346,7 +383,7 @@ void main() {
       await tester.tap(find.text('Play My Shruti'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Assist Mode'), findsOneWidget);
+      expect(find.text('Find My Shruti'), findsOneWidget);
       expect(find.text('Play My Shruti'), findsNothing);
       expect(drone.selectedPitch, Pitch.cSharp);
       expect(drone.isPlaying, isTrue);
@@ -392,11 +429,16 @@ void main() {
                               candidateFinder: buildFinder(),
                               referenceSoundGenerator:
                                   FakeReferenceSoundGenerator(),
+                              tutorVoice: SilentTutorVoice(),
+                              speechRecognizer: SilentTutorSpeechRecognizer(),
+                              tutorTiming: const TutorTimingConfig.instant(),
+                              autoBegin: false,
                               timing: const AssistTimingConfig(
                                 referencePlayDuration: Duration(seconds: 30),
                                 settlingDuration: Duration(seconds: 30),
                                 listenDuration: Duration(seconds: 30),
                                 transitionDuration: Duration(seconds: 30),
+                                countdownStepDuration: Duration.zero,
                               ),
                               prepareAudioSession: () async {},
                               wait: (_) => hold.future,
@@ -407,7 +449,7 @@ void main() {
                           await drone.playPitch(pitch);
                         }
                       },
-                      child: const Text('Assist Mode'),
+                      child: const Text('Find My Shruti'),
                     ),
                   ],
                 ),
@@ -418,17 +460,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Assist Mode'));
+      await tester.tap(find.text('Find My Shruti'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sing one comfortable note'), findsOneWidget);
-      await tester.tap(find.text('Start'));
-      await tester.pump();
-      await tester.pump();
+      expect(find.text('Find your comfortable Shruti'), findsOneWidget);
+      expect(find.text('Start'), findsNothing);
 
-      expect(find.text('Sing one comfortable note'), findsWidgets);
-      expect(find.text('Listen to your reference'), findsNothing);
-
+      // Manually start since autoBegin is false.
+      // Screen with autoBegin false stays on welcome — page back from welcome.
       await tester.pageBack();
       await tester.pumpAndSettle();
 
@@ -513,15 +552,20 @@ void main() {
                       onPressed: () async {
                         final pitch = await Navigator.of(context).push<Pitch>(
                           MaterialPageRoute<Pitch>(
-                            builder: (_) =>
-                                AssistModeScreen(controller: assistController),
+                            builder: (_) => AssistModeScreen(
+                              controller: assistController,
+                              tutorVoice: SilentTutorVoice(),
+                              speechRecognizer: SilentTutorSpeechRecognizer(),
+                              tutorTiming: const TutorTimingConfig.instant(),
+                              autoBegin: false,
+                            ),
                           ),
                         );
                         if (pitch != null) {
                           await drone.playPitch(pitch);
                         }
                       },
-                      child: const Text('Assist Mode'),
+                      child: const Text('Find My Shruti'),
                     ),
                   ],
                 ),
@@ -532,7 +576,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Assist Mode'));
+      await tester.tap(find.text('Find My Shruti'));
       await tester.pumpAndSettle();
 
       expect(find.text('Play My Shruti'), findsOneWidget);
@@ -579,295 +623,311 @@ void main() {
     );
   }
 
-  testWidgets(
-    'Stage 1 result shows detected Shruti before Stage 2 begins',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('Stage 1 result shows detected Shruti before Stage 2 begins', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-      final holdForever = Completer<void>();
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    final holdForever = Completer<void>();
 
-      await tester.runAsync(() async {
-        controller = AssistModeController(
-          detectionService: detection,
-          audioService: audio,
-          candidateFinder: buildFinder(),
-          targetMatcher: buildMatcher(),
-          referenceSoundGenerator: FakeReferenceSoundGenerator(),
-          timing: fastTiming,
-          initialReferencePitch: Pitch.c,
-          prepareAudioSession: () async {},
-          wait: (_) async {
-            if (controller.uiPhase == AssistUiPhase.listening) {
-              emitStable(detection, Pitch.cSharp);
-            }
-            if (controller.uiPhase == AssistUiPhase.startingPointFound) {
-              await holdForever.future;
-            }
-          },
-        );
-        unawaited(controller.startSession());
-        for (var i = 0; i < 200; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 1));
+    await tester.runAsync(() async {
+      controller = AssistModeController(
+        detectionService: detection,
+        audioService: audio,
+        candidateFinder: buildFinder(),
+        targetMatcher: buildMatcher(),
+        referenceSoundGenerator: FakeReferenceSoundGenerator(),
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {},
+        wait: (_) async {
+          if (controller.uiPhase == AssistUiPhase.listening) {
+            emitStable(detection, Pitch.cSharp);
+          }
           if (controller.uiPhase == AssistUiPhase.startingPointFound) {
-            break;
+            await holdForever.future;
           }
+        },
+      );
+      unawaited(controller.startSession());
+      for (var i = 0; i < 200; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+        if (controller.uiPhase == AssistUiPhase.startingPointFound) {
+          break;
         }
-      });
-      addTearDown(() async {
-        await controller.stopSession();
-        controller.dispose();
-      });
+      }
+    });
+    addTearDown(() async {
+      await controller.stopSession();
+      controller.dispose();
+    });
 
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-      );
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      expect(controller.uiPhase, AssistUiPhase.startingPointFound);
-      expect(find.text('Let\'s explore your range'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-prominent-shruti')),
-        findsOneWidget,
-      );
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(
-        find.text('Three notes — low, middle, then high.'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Hz'), findsNothing);
-    },
-  );
+    expect(controller.uiPhase, AssistUiPhase.startingPointFound);
+    expect(find.text('Lovely — I heard that'), findsOneWidget);
+    expect(
+      find.text("Now I'll find a comfortable range for you."),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Hz'), findsNothing);
+  });
 
-  testWidgets(
-    'Stage 2 range guide shows current target point',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('Stage 2 listening hides the technical range guide', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-      final holdListen = Completer<void>();
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    final holdListen = Completer<void>();
 
-      await tester.runAsync(() async {
-        controller = AssistModeController(
-          detectionService: detection,
-          audioService: audio,
-          candidateFinder: buildFinder(),
-          targetMatcher: buildMatcher(),
-          referenceSoundGenerator: FakeReferenceSoundGenerator(),
-          timing: fastTiming,
-          initialReferencePitch: Pitch.c,
-          prepareAudioSession: () async {},
-          wait: (_) async {
-            if (controller.uiPhase == AssistUiPhase.listening) {
-              if (!controller.isExploringRange) {
-                emitStable(detection, Pitch.cSharp);
-                return;
-              }
-              // Hold on first Stage 2 listen so the guide is visible.
-              if (controller.currentRangePoint == AssistRangePoint.lowerSa &&
-                  !holdListen.isCompleted) {
-                await holdListen.future;
-              }
-              emitForCurrentListen(detection, controller, Pitch.cSharp);
+    await tester.runAsync(() async {
+      controller = AssistModeController(
+        detectionService: detection,
+        audioService: audio,
+        candidateFinder: buildFinder(),
+        targetMatcher: buildMatcher(),
+        referenceSoundGenerator: FakeReferenceSoundGenerator(),
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {},
+        wait: (_) async {
+          if (controller.uiPhase == AssistUiPhase.listening) {
+            if (!controller.isExploringRange) {
+              emitStable(detection, Pitch.cSharp);
+              return;
             }
-          },
-        );
-        unawaited(controller.startSession());
-        for (var i = 0; i < 400; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 1));
-          if (controller.isExploringRange &&
-              controller.uiPhase == AssistUiPhase.listening &&
-              controller.currentRangePoint == AssistRangePoint.lowerSa) {
-            break;
+            // Hold on first Stage 2 listen so the guide is visible.
+            if (controller.currentRangePoint == AssistRangePoint.lowerSa &&
+                !holdListen.isCompleted) {
+              await holdListen.future;
+            }
+            emitForCurrentListen(detection, controller, Pitch.cSharp);
           }
+        },
+      );
+      unawaited(controller.startSession());
+      for (var i = 0; i < 400; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+        if (controller.isExploringRange &&
+            controller.uiPhase == AssistUiPhase.listening &&
+            controller.currentRangePoint == AssistRangePoint.lowerSa) {
+          break;
         }
-      });
-      addTearDown(() async {
-        holdListen.complete();
-        await controller.stopSession();
-        controller.dispose();
-      });
+      }
+    });
+    addTearDown(() async {
+      holdListen.complete();
+      await controller.stopSession();
+      controller.dispose();
+    });
 
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-      );
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
-      expect(controller.rangeTargetGuidePosition, 0.0);
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(find.text('Follow the target'), findsOneWidget);
-      expect(find.text('Lower Sa'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-range-guide')),
-        findsOneWidget,
+    expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
+    expect(find.text(Pitch.cSharp.label), findsNothing);
+    expect(find.text('Your turn'), findsOneWidget);
+    expect(find.text('Lower Sa'), findsNothing);
+    expect(find.text('Low'), findsNothing);
+    expect(find.text('Mid'), findsNothing);
+    expect(find.text('High'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('assist-range-guide')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('tutor-exercise-dots')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('voice-activity-orb')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Hz'), findsNothing);
+  });
+
+  testWidgets('Stage 2 completion shows the last comfortable Shruti', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+
+    await tester.runAsync(() async {
+      controller = AssistModeController(
+        detectionService: detection,
+        audioService: audio,
+        candidateFinder: buildFinder(),
+        targetMatcher: buildMatcher(),
+        referenceSoundGenerator: FakeReferenceSoundGenerator(),
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {},
+        wait: (_) async {
+          if (controller.uiPhase == AssistUiPhase.listening) {
+            emitForCurrentListen(detection, controller, Pitch.cSharp);
+          }
+        },
       );
-      expect(
-        find.byKey(const ValueKey<String>('assist-range-target-marker')),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(
-          ValueKey<String>(
-            'assist-range-target-${AssistRangePoint.lowerSa}',
-          ),
+      await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
+      expect(controller.uiPhase, AssistUiPhase.completed);
+    });
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-        findsOneWidget,
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('We found it'), findsOneWidget);
+    expect(find.text('Your comfortable Shruti'), findsOneWidget);
+    expect(find.text(Pitch.cSharp.label), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
+      findsOneWidget,
+    );
+    expect(find.text('Could you hear and match the lower Sa?'), findsNothing);
+    expect(find.textContaining('Hz'), findsNothing);
+  });
+
+  testWidgets('Try Again clears previous Shruti from the Assist UI', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    var pass = 0;
+    var sawClearedMidRestart = false;
+
+    await tester.runAsync(() async {
+      controller = AssistModeController(
+        detectionService: detection,
+        audioService: audio,
+        candidateFinder: buildFinder(),
+        targetMatcher: buildMatcher(),
+        referenceSoundGenerator: FakeReferenceSoundGenerator(),
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {},
+        wait: (_) async {
+          if (pass == 1 &&
+              !sawClearedMidRestart &&
+              !controller.isExploringRange &&
+              (controller.uiPhase == AssistUiPhase.playingReference ||
+                  controller.uiPhase == AssistUiPhase.listening)) {
+            expect(controller.stage1Shruti, isNull);
+            expect(controller.currentExploreCandidate, isNull);
+            expect(controller.currentRangePoint, isNull);
+            sawClearedMidRestart = true;
+          }
+          if (controller.uiPhase == AssistUiPhase.listening) {
+            emitForCurrentListen(
+              detection,
+              controller,
+              pass == 0 ? Pitch.e : Pitch.a,
+            );
+          }
+        },
       );
-      expect(find.textContaining('Hz'), findsNothing);
-    },
-  );
+      await controller.startSession();
+      await finishStage2WithoutClimbing(controller);
+      expect(controller.referencePitch, Pitch.e);
+      expect(controller.stage1Shruti, Pitch.e);
+    });
+    addTearDown(controller.dispose);
 
-  testWidgets(
-    'Stage 2 completion shows the last comfortable Shruti',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-
-      await tester.runAsync(() async {
-        controller = AssistModeController(
-          detectionService: detection,
-          audioService: audio,
-          candidateFinder: buildFinder(),
-          targetMatcher: buildMatcher(),
-          referenceSoundGenerator: FakeReferenceSoundGenerator(),
-          timing: fastTiming,
-          initialReferencePitch: Pitch.c,
-          prepareAudioSession: () async {},
-          wait: (_) async {
-            if (controller.uiPhase == AssistUiPhase.listening) {
-              emitForCurrentListen(detection, controller, Pitch.cSharp);
-            }
-          },
-        );
-        await controller.startSession();
-        await finishStage2WithoutClimbing(controller);
-        expect(controller.uiPhase, AssistUiPhase.completed);
-      });
-      addTearDown(controller.dispose);
-
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-      );
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      expect(find.text('Your comfortable Shruti'), findsOneWidget);
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
-        findsOneWidget,
-      );
-      expect(find.text('Could you hear and match the lower Sa?'), findsNothing);
-      expect(find.textContaining('Hz'), findsNothing);
-    },
-  );
+    expect(find.text(Pitch.e.label), findsOneWidget);
+    expect(find.text('We found it'), findsOneWidget);
+    expect(find.text('Your comfortable Shruti'), findsOneWidget);
 
-  testWidgets(
-    'Try Again clears previous Shruti from the Assist UI',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+    pass = 1;
+    await tester.runAsync(() async {
+      await controller.tryAgain();
+      await finishStage2WithoutClimbing(controller);
+    });
+    await tester.pumpAndSettle();
 
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-      var pass = 0;
-      var sawClearedMidRestart = false;
-
-      await tester.runAsync(() async {
-        controller = AssistModeController(
-          detectionService: detection,
-          audioService: audio,
-          candidateFinder: buildFinder(),
-          targetMatcher: buildMatcher(),
-          referenceSoundGenerator: FakeReferenceSoundGenerator(),
-          timing: fastTiming,
-          initialReferencePitch: Pitch.c,
-          prepareAudioSession: () async {},
-          wait: (_) async {
-            if (pass == 1 &&
-                !sawClearedMidRestart &&
-                !controller.isExploringRange &&
-                (controller.uiPhase == AssistUiPhase.playingReference ||
-                    controller.uiPhase == AssistUiPhase.listening)) {
-              expect(controller.stage1Shruti, isNull);
-              expect(controller.currentExploreCandidate, isNull);
-              expect(controller.currentRangePoint, isNull);
-              sawClearedMidRestart = true;
-            }
-            if (controller.uiPhase == AssistUiPhase.listening) {
-              emitForCurrentListen(
-                detection,
-                controller,
-                pass == 0 ? Pitch.e : Pitch.a,
-              );
-            }
-          },
-        );
-        await controller.startSession();
-        await finishStage2WithoutClimbing(controller);
-        expect(controller.referencePitch, Pitch.e);
-        expect(controller.stage1Shruti, Pitch.e);
-      });
-      addTearDown(controller.dispose);
-
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
-        ),
-      );
-      await tester.pump();
-
-      expect(find.text(Pitch.e.label), findsOneWidget);
-      expect(find.text('Your comfortable Shruti'), findsOneWidget);
-
-      pass = 1;
-      await tester.runAsync(() async {
-        await controller.tryAgain();
-        await finishStage2WithoutClimbing(controller);
-      });
-      await tester.pumpAndSettle();
-
-      expect(sawClearedMidRestart, isTrue);
-      expect(find.text(Pitch.e.label), findsNothing);
-      expect(find.text(Pitch.a.label), findsOneWidget);
-      expect(find.text('Your comfortable Shruti'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
-        findsOneWidget,
-      );
-      expect(controller.stage1Shruti, Pitch.a);
-      expect(controller.referencePitch, Pitch.a);
-    },
-  );
+    expect(sawClearedMidRestart, isTrue);
+    expect(find.text(Pitch.e.label), findsNothing);
+    expect(find.text(Pitch.a.label), findsOneWidget);
+    expect(find.text('We found it'), findsOneWidget);
+    expect(find.text('Your comfortable Shruti'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
+      findsOneWidget,
+    );
+    expect(controller.stage1Shruti, Pitch.a);
+    expect(controller.referencePitch, Pitch.a);
+  });
 
   Future<AssistModeController> buildSessionAtPhase({
     required FakePitchDetectionService detection,
@@ -931,22 +991,25 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+          home: AssistModeScreen(
+            controller: controller,
+            tutorVoice: SilentTutorVoice(),
+            speechRecognizer: SilentTutorSpeechRecognizer(),
+            tutorTiming: const TutorTimingConfig.instant(),
+            autoBegin: false,
+          ),
         ),
       );
       await tester.pumpAndSettle();
 
       expectNoRenderOverflow(tester);
-      expect(
-        find.text('Could you hear and match the lower Sa?'),
-        findsOneWidget,
-      );
+      expect(find.text('Could you hear that sound clearly?'), findsOneWidget);
       expect(find.text('Yes'), findsOneWidget);
-      expect(find.text('No, it was too low'), findsOneWidget);
+      expect(find.text('No'), findsOneWidget);
       expect(find.text('Stop'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-range-guide')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(
         find.byKey(const ValueKey<String>('assist-content-scroll')),
@@ -979,68 +1042,174 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+          home: AssistModeScreen(
+            controller: controller,
+            tutorVoice: SilentTutorVoice(),
+            speechRecognizer: SilentTutorSpeechRecognizer(),
+            tutorTiming: const TutorTimingConfig.instant(),
+            autoBegin: false,
+          ),
         ),
       );
       await tester.pumpAndSettle();
 
       expectNoRenderOverflow(tester);
-      expect(find.text('How did the upper Sa feel?'), findsOneWidget);
+      expect(find.text('How did that feel?'), findsOneWidget);
       expect(find.text('Comfortable'), findsOneWidget);
-      expect(find.text('It felt strained'), findsOneWidget);
+      expect(find.text('Not comfortable'), findsOneWidget);
       expect(find.text('Stop'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-range-guide')),
-        findsOneWidget,
+        findsNothing,
       );
     },
   );
 
-  testWidgets(
-    'question states remain usable at standard phone size',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('question states remain usable at standard phone size', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
 
-      await tester.runAsync(() async {
-        controller = await buildSessionAtPhase(
-          detection: detection,
-          audio: audio,
-          targetPhase: AssistUiPhase.awaitingLowerAudibility,
-        );
-      });
-      addTearDown(controller.dispose);
+    await tester.runAsync(() async {
+      controller = await buildSessionAtPhase(
+        detection: detection,
+        audio: audio,
+        targetPhase: AssistUiPhase.awaitingLowerAudibility,
+      );
+    });
+    addTearDown(controller.dispose);
 
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(controller: controller),
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-      );
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      expectNoRenderOverflow(tester);
-      expect(find.text('Yes'), findsOneWidget);
-      expect(
-        find.byKey(const ValueKey<String>('assist-range-guide')),
-        findsOneWidget,
-      );
+    expectNoRenderOverflow(tester);
+    expect(find.text('Yes'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('assist-range-guide')),
+      findsNothing,
+    );
 
-      await tester.runAsync(() async {
-        await controller.reportLowerSaAudible();
-      });
-      await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await controller.reportLowerSaAudible();
+    });
+    await tester.pumpAndSettle();
 
-      expectNoRenderOverflow(tester);
-      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
-      expect(find.text('Comfortable'), findsOneWidget);
-      expect(find.text('It felt strained'), findsOneWidget);
-    },
-  );
+    expectNoRenderOverflow(tester);
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(find.text('Comfortable'), findsOneWidget);
+    expect(find.text('Not comfortable'), findsOneWidget);
+  });
+
+  testWidgets('stop shows a stopped state and removes the exercise dots', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    final hold = Completer<void>();
+    addTearDown(() {
+      if (!hold.isCompleted) {
+        hold.complete();
+      }
+    });
+    final controller = AssistModeController(
+      detectionService: detection,
+      audioService: audio,
+      candidateFinder: buildFinder(),
+      targetMatcher: TargetPitchMatcher(
+        toleranceCents: 50,
+        samplesToMatch: 4,
+        samplesToLoseMatch: 2,
+        stabilityTracker: PitchStabilityTracker(
+          samplesToBecomeStable: 3,
+          mismatchesToBecomeUnstable: 2,
+        ),
+      ),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      wait: (_) => hold.future,
+      prepareAudioSession: () async {},
+    );
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) {
+            return TextButton(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => AssistModeScreen(
+                      controller: controller,
+                      tutorVoice: FakeTutorVoice(),
+                      speechRecognizer: SilentTutorSpeechRecognizer(),
+                      tutorTiming: const TutorTimingConfig.instant(),
+                      autoBegin: true,
+                    ),
+                  ),
+                );
+              },
+              child: const Text('open-assist'),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('open-assist'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('tutor-exercise-dots')),
+      findsNothing,
+    );
+    expect(find.byType(BackButton), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('assist-stop')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('assist-stop')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Session stopped'), findsOneWidget);
+    expect(
+      find.text("You can try again whenever you're ready."),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('assist-session-stopped-try-again')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey<String>('assist-stop')), findsNothing);
+    expect(find.byType(BackButton), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('tutor-exercise-dots')),
+      findsNothing,
+    );
+  });
 }

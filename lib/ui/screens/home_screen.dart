@@ -106,7 +106,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
                   await _controller.playPitch(pitch);
                 },
-                child: const Text('Assist Mode'),
+                child: const Text('Find My Shruti'),
               ),
             ],
           ),

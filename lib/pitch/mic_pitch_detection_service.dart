@@ -6,6 +6,7 @@ import 'package:record/record.dart';
 
 import 'package:harmony/pitch/frequency_to_note.dart';
 import 'package:harmony/pitch/pitch_detection_service.dart';
+import 'package:harmony/pitch/voice_activity.dart';
 
 /// Microphone pitch detection using PCM capture + the YIN algorithm.
 ///
@@ -177,13 +178,17 @@ class MicPitchDetectionService implements PitchDetectionService {
         return;
       }
 
+      final level = VoiceActivity.levelFromPcm16(pcmWindow);
+      // YIN can invent an F0 on silence. Require real microphone energy
+      // before a reading can become a match.
       final isReliable =
+          VoiceActivity.hasVoiceEnergy(pcmWindow) &&
           result.pitched &&
           result.probability >= minProbability &&
           result.pitch > 0;
 
       if (!isReliable) {
-        _readingsController.add(PitchReading.none);
+        _readingsController.add(PitchReading(hasPitch: false, level: level));
         return;
       }
 
@@ -192,6 +197,7 @@ class MicPitchDetectionService implements PitchDetectionService {
           hasPitch: true,
           frequencyHz: result.pitch,
           note: noteFromFrequency(result.pitch),
+          level: level,
         ),
       );
     } catch (error, stackTrace) {

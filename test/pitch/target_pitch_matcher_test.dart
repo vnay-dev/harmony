@@ -47,6 +47,26 @@ void main() {
     feed(hz, samplesToBecomeStable + samplesToMatch - 1);
   }
 
+  test('silence never becomes matched', () {
+    matcher.start(targetHz);
+    for (var i = 0; i < 30; i++) {
+      matcher.add(PitchReading.none);
+    }
+    expect(matcher.isMatched, isFalse);
+    expect(matcher.state, TargetPitchMatchState.listening);
+  });
+
+  test('invalid F0 never becomes matched', () {
+    matcher.start(targetHz);
+    for (var i = 0; i < 20; i++) {
+      matcher.add(const PitchReading(hasPitch: true, frequencyHz: 0));
+      matcher.add(const PitchReading(hasPitch: true, frequencyHz: -3));
+      matcher.add(PitchReading(hasPitch: false, frequencyHz: targetHz));
+    }
+    expect(matcher.isMatched, isFalse);
+    expect(matcher.state, isNot(TargetPitchMatchState.matched));
+  });
+
   test('starts waiting until a target is provided', () {
     expect(matcher.state, TargetPitchMatchState.waiting);
     matcher.add(reading(targetHz));

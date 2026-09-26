@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/audio/reference_tone_wav.dart';
@@ -58,27 +60,59 @@ void main() {
       }
     });
 
-    test('Lower Sa tone keeps the fundamental clearly dominant', () {
-      final wav = buildReferenceToneWav(
-        frequencyHz: 130.81,
-        duration: const Duration(milliseconds: 900),
-      );
-      final energies = estimateHarmonicEnergies(wav, fundamentalHz: 130.81);
-      expect(energies, isNotNull);
-      final fundamental = energies![1]!;
-      final second = energies[2]!;
-      final third = energies[3]!;
-      final fourth = energies[4]!;
+    test('harmonic balance stays focused from low Sa through high Sa', () {
+      // C3, G3, C4, and B4 cover the soft, middle, and brightest phone-speaker cases.
+      final notes = <double>[
+        frequencyHzForPitch(Pitch.c, octave: 3),
+        frequencyHzForPitch(Pitch.g, octave: 3),
+        frequencyHzForPitch(Pitch.c, octave: 4),
+        frequencyHzForPitch(Pitch.b, octave: 4),
+      ];
 
-      expect(fundamental, greaterThan(0));
-      // 2nd harmonic is present for warmth but well below the fundamental.
-      expect(second / fundamental, lessThan(0.45));
-      expect(second / fundamental, greaterThan(0.05));
-      // 3rd and 4th are strongly reduced vs the fundamental.
-      expect(third / fundamental, lessThan(0.12));
-      expect(fourth / fundamental, lessThan(0.08));
-      expect(third, lessThan(second));
-      expect(fourth, lessThan(third));
+      for (final hz in notes) {
+        final wav = buildReferenceToneWav(
+          frequencyHz: hz,
+          duration: const Duration(milliseconds: 900),
+        );
+        final energies = estimateHarmonicEnergies(wav, fundamentalHz: hz);
+        expect(energies, isNotNull, reason: 'hz=$hz');
+        final fundamental = energies![1]!;
+        final second = energies[2]! / fundamental;
+        final third = energies[3]! / fundamental;
+        final fourth = energies[4]! / fundamental;
+
+        expect(fundamental, greaterThan(0), reason: 'hz=$hz');
+        // Octave adds body, still well under the fundamental.
+        expect(second, inInclusiveRange(0.06, 0.16), reason: 'hz=$hz');
+        // 3rd/4th are the phone-speaker definition, kept quiet enough to stay warm.
+        expect(third, inInclusiveRange(0.008, 0.04), reason: 'hz=$hz');
+        expect(fourth, inInclusiveRange(0.001, 0.012), reason: 'hz=$hz');
+        expect(fourth, lessThan(third), reason: 'hz=$hz');
+        expect(third, lessThan(second), reason: 'hz=$hz');
+      }
+    });
+
+    test('attack and release stay silent and the sustain does not clip', () {
+      final wav = buildReferenceToneWav(
+        frequencyHz: 196,
+        duration: const Duration(milliseconds: 500),
+      );
+      final data = ByteData.sublistView(wav);
+      final sampleCount = data.getUint32(40, Endian.little) ~/ 2;
+      final first = data.getInt16(44, Endian.little);
+      final last = data.getInt16(44 + (sampleCount - 1) * 2, Endian.little);
+      expect(first.abs(), lessThan(200));
+      expect(last.abs(), lessThan(800));
+
+      var peak = 0;
+      for (var i = 0; i < sampleCount; i++) {
+        final sample = data.getInt16(44 + i * 2, Endian.little).abs();
+        if (sample > peak) {
+          peak = sample;
+        }
+      }
+      expect(peak, greaterThan(8000));
+      expect(peak, lessThan(32000));
     });
 
     test('identical frequency requests are deterministic', () {
