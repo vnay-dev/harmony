@@ -2,7 +2,12 @@ import 'package:harmony/models/pitch.dart';
 
 /// One pitch-detection reading from the microphone.
 class PitchReading {
-  const PitchReading({required this.hasPitch, this.frequencyHz, this.note});
+  const PitchReading({
+    required this.hasPitch,
+    this.frequencyHz,
+    this.note,
+    this.level = 0,
+  });
 
   /// No reliable pitch detected (silence, noise, speech without clear F0).
   static const PitchReading none = PitchReading(hasPitch: false);
@@ -10,6 +15,12 @@ class PitchReading {
   final bool hasPitch;
   final double? frequencyHz;
   final Pitch? note;
+
+  /// Microphone energy for this window, from 0 (silence) to 1 (loud).
+  ///
+  /// Independent of whether a pitch was accepted. Used for voice-activity
+  /// feedback, not for Shruti matching.
+  final double level;
 }
 
 /// Contract for live microphone pitch detection.

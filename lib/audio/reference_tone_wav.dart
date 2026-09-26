@@ -1,11 +1,30 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+/// Relative partial levels for the tutor reference tone.
+///
+/// Phone speakers barely radiate energy below a few hundred hertz, so a
+/// near-sine at Lower Sa sounds soft and hard to place. These levels keep the
+/// fundamental largest, give the octave a little more body, and add a modest
+/// 3rd and 4th so the speaker has something it can actually play. They are
+/// the only timbre controls — change them here, not the playback path.
+class ReferenceToneMix {
+  const ReferenceToneMix._();
+
+  static const fundamental = 0.72;
+  static const second = 0.22;
+  static const third = 0.09;
+  static const fourth = 0.035;
+
+  /// Headroom so the partials sum without clipping or a loudness jump.
+  static const peakScale = 0.88;
+}
+
 /// Builds a short mono WAV for a Stage 2 pitch reference.
 ///
-/// Synthesis is intentionally simple and frequency-driven (no sample assets):
-/// a clearly dominant fundamental, a subtle 2nd harmonic for warmth, and
-/// strongly reduced higher harmonics — one clear sustained pitch, no FX.
+/// Synthesis is frequency-driven (no sample assets): one sustained pitch,
+/// smooth attack and release, no filtering or distortion. [frequencyHz] is
+/// the fundamental and is not shifted.
 Uint8List buildReferenceToneWav({
   required double frequencyHz,
   Duration duration = const Duration(seconds: 5),
@@ -32,15 +51,11 @@ Uint8List buildReferenceToneWav({
     (sampleRate * 0.09).round(),
   );
 
-  // Pitch clarity first: fundamental leads; 2nd harmonic adds gentle body;
-  // 3rd/4th stay very quiet so a low Sa does not sound mixed with highs.
-  // Spectral balance is controlled by these amplitudes (no FX filter chain).
-  // Keep the 2nd harmonic present enough for natural body — do not over-muffle.
-  const fundamentalAmp = 0.78;
-  const secondHarmonicAmp = 0.20;
-  const thirdHarmonicAmp = 0.03;
-  const fourthHarmonicAmp = 0.008;
-  const peakScale = 0.88;
+  const fundamentalAmp = ReferenceToneMix.fundamental;
+  const secondHarmonicAmp = ReferenceToneMix.second;
+  const thirdHarmonicAmp = ReferenceToneMix.third;
+  const fourthHarmonicAmp = ReferenceToneMix.fourth;
+  const peakScale = ReferenceToneMix.peakScale;
 
   for (var i = 0; i < totalSamples; i++) {
     final t = i / sampleRate;

@@ -11,9 +11,15 @@ import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
-import 'package:harmony/ui/components/assist_range_guide.dart';
+import 'package:harmony/tutor/flutter_tutor_voice.dart';
+import 'package:harmony/tutor/speech_to_text_recognizer.dart';
+import 'package:harmony/tutor/tutor_session.dart';
+import 'package:harmony/tutor/tutor_speech_recognizer.dart';
+import 'package:harmony/tutor/tutor_timing.dart';
+import 'package:harmony/tutor/tutor_voice.dart';
+import 'package:harmony/ui/components/voice_activity_indicator.dart';
 
-/// Assist Mode: Stage 1 capture a starting note, Stage 2 guided range check.
+/// Voice-first singing tutor that finds a comfortable Shruti.
 class AssistModeScreen extends StatefulWidget {
   const AssistModeScreen({
     super.key,
@@ -24,17 +30,25 @@ class AssistModeScreen extends StatefulWidget {
     TargetPitchMatcher? targetMatcher,
     ReferenceSoundGenerator? referenceSoundGenerator,
     AssistModeController? controller,
+    TutorSession? tutorSession,
+    TutorVoice? tutorVoice,
+    TutorSpeechRecognizer? speechRecognizer,
     this.timing,
+    this.tutorTiming,
     this.initialReferencePitch,
     this.wait,
     this.prepareAudioSession,
+    this.autoBegin = true,
   }) : _detectionService = detectionService,
        _audioService = audioService,
        _candidateFinder = candidateFinder,
        _pitchAdjuster = pitchAdjuster,
        _targetMatcher = targetMatcher,
        _referenceSoundGenerator = referenceSoundGenerator,
-       _controller = controller;
+       _controller = controller,
+       _tutorSession = tutorSession,
+       _tutorVoice = tutorVoice,
+       _speechRecognizer = speechRecognizer;
 
   final PitchDetectionService? _detectionService;
   final AudioService? _audioService;
@@ -43,9 +57,15 @@ class AssistModeScreen extends StatefulWidget {
   final TargetPitchMatcher? _targetMatcher;
   final ReferenceSoundGenerator? _referenceSoundGenerator;
   final AssistModeController? _controller;
+  final TutorSession? _tutorSession;
+  final TutorVoice? _tutorVoice;
+  final TutorSpeechRecognizer? _speechRecognizer;
 
   /// Optional timing overrides (tests / tuning).
   final AssistTimingConfig? timing;
+
+  /// Optional tutor speech pacing overrides.
+  final TutorTimingConfig? tutorTiming;
 
   /// Optional starting Sa (defaults to the app default pitch).
   final Pitch? initialReferencePitch;
@@ -56,20 +76,25 @@ class AssistModeScreen extends StatefulWidget {
   /// Optional audio-session setup override (tests inject a no-op).
   final Future<void> Function()? prepareAudioSession;
 
+  /// When true (default), welcome speech runs and the session auto-starts.
+  final bool autoBegin;
+
   @override
   State<AssistModeScreen> createState() => _AssistModeScreenState();
 }
 
 class _AssistModeScreenState extends State<AssistModeScreen> {
   late final AssistModeController _controller;
+  late final TutorSession _tutor;
   late final bool _ownsController;
+  late final bool _ownsTutor;
 
   @override
   void initState() {
     super.initState();
-    final injected = widget._controller;
-    if (injected != null) {
-      _controller = injected;
+    final injectedController = widget._controller;
+    if (injectedController != null) {
+      _controller = injectedController;
       _ownsController = false;
     } else {
       _controller = AssistModeController(
@@ -90,10 +115,37 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       );
       _ownsController = true;
     }
-    _controller.addListener(_onControllerChanged);
+
+    final injectedTutor = widget._tutorSession;
+    if (injectedTutor != null) {
+      _tutor = injectedTutor;
+      _ownsTutor = false;
+    } else {
+      _tutor = TutorSession(
+        engine: _controller,
+        voice: widget._tutorVoice ?? FlutterTutorVoice(),
+        speechRecognizer:
+            widget._speechRecognizer ?? SpeechToTextTutorRecognizer(),
+        timing: widget.tutorTiming ?? const TutorTimingConfig(),
+        // Do not share the engine wait — speech pauses must never block on
+        // Assist listen/reference windows.
+      );
+      _ownsTutor = true;
+    }
+
+    _tutor.addListener(_onTutorChanged);
+    _controller.addListener(_onTutorChanged);
+
+    if (widget.autoBegin) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _tutor.begin();
+        }
+      });
+    }
   }
 
-  void _onControllerChanged() {
+  void _onTutorChanged() {
     if (mounted) {
       setState(() {});
     }
@@ -101,101 +153,29 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 
   @override
   void dispose() {
-    _controller.removeListener(_onControllerChanged);
+    _tutor.removeListener(_onTutorChanged);
+    _controller.removeListener(_onTutorChanged);
+    if (_ownsTutor) {
+      _tutor.dispose();
+    }
     if (_ownsController) {
       _controller.dispose();
     }
     super.dispose();
   }
 
-  /// Prominent Shruti for Stage 1 result, Stage 2 candidate, or completion.
-  Pitch? get _prominentShruti {
-    final phase = _controller.uiPhase;
-    if (phase == AssistUiPhase.intro ||
-        phase == AssistUiPhase.retry ||
-        phase == AssistUiPhase.rangeUnresolved) {
-      return null;
-    }
-    if (phase == AssistUiPhase.completed) {
-      return _controller.referencePitch;
-    }
-    if (phase == AssistUiPhase.rangeBoundaryReached) {
-      // Show the last comfortable Shruti — never the strained boundary.
-      return _controller.lastComfortableShruti;
-    }
-    if (phase == AssistUiPhase.startingPointFound ||
-        phase == AssistUiPhase.exploringNextShruti ||
-        _controller.isExploringRange) {
-      return _controller.currentExploreCandidate ??
-          _controller.stage1Shruti ??
-          _controller.referencePitch;
-    }
-    return null;
-  }
-
-  bool get _showRangeGuide {
-    if (!_controller.isExploringRange) {
-      return false;
-    }
-    final phase = _controller.uiPhase;
-    return phase == AssistUiPhase.playingReference ||
-        phase == AssistUiPhase.preparingToListen ||
-        phase == AssistUiPhase.listening ||
-        phase == AssistUiPhase.processing ||
-        phase == AssistUiPhase.showingTransition ||
-        phase == AssistUiPhase.awaitingLowerAudibility ||
-        phase == AssistUiPhase.awaitingUpperComfort;
-  }
-
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
-    final errorMessage = _controller.errorMessage;
-    final uiPhase = _controller.uiPhase;
-    final prominent = _prominentShruti;
-    final showRound =
-        _controller.isSessionActive &&
-        !_controller.isExploringRange &&
-        uiPhase != AssistUiPhase.intro &&
-        uiPhase != AssistUiPhase.completed &&
-        uiPhase != AssistUiPhase.rangeUnresolved &&
-        uiPhase != AssistUiPhase.startingPointFound;
-
-    final rangePoint = _controller.currentRangePoint;
-    final targetPos = _controller.rangeTargetGuidePosition;
-
     return Scaffold(
-      appBar: AppBar(title: const Text('Assist Mode')),
+      appBar: AppBar(title: const Text('Find your Shruti')),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(DesignTokens.spaceLg),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (showRound) ...[
-                Text(
-                  'Round ${_controller.currentRound}',
-                  key: const ValueKey<String>('assist-round'),
-                  style: textTheme.labelLarge?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.64),
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: DesignTokens.spaceSm),
-                Text(
-                  _cycleHint(uiPhase),
-                  key: ValueKey<String>('assist-cycle-$uiPhase'),
-                  style: textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurface.withValues(alpha: 0.72),
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: DesignTokens.spaceMd),
-              ],
-              // Scrollable middle: Spacers in a fixed Column cannot shrink
-              // enough when Range Guide + multi-button question actions
-              // exceed short phone heights (overflow ~59px).
               Expanded(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
@@ -209,85 +189,75 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (prominent != null) ...[
+                            if (_tutor.confirmedShrutiLabel != null) ...[
                               Text(
-                                prominent.label,
-                                key: ValueKey<String>(
-                                  uiPhase == AssistUiPhase.completed
-                                      ? 'assist-confirmed-shruti'
-                                      : 'assist-prominent-shruti',
+                                _tutor.confirmedShrutiLabel!,
+                                key: const ValueKey<String>(
+                                  'assist-confirmed-shruti',
                                 ),
                                 style: textTheme.displaySmall,
                                 textAlign: TextAlign.center,
                               ),
                               const SizedBox(height: DesignTokens.spaceLg),
                             ],
-                            Text(
-                              _actionCue(uiPhase),
-                              key: ValueKey<String>(
-                                'assist-headline-$uiPhase',
+                            if (_tutor.showCountdown) ...[
+                              _CountdownDisplay(
+                                value: _tutor.countdownValue ?? 0,
+                                colorScheme: colorScheme,
+                                textTheme: textTheme,
                               ),
-                              style: textTheme.titleLarge,
-                              textAlign: TextAlign.center,
-                            ),
-                            if (_supportText(uiPhase) != null) ...[
-                              const SizedBox(height: DesignTokens.spaceMd),
+                              const SizedBox(height: DesignTokens.spaceLg),
+                            ] else ...[
                               Text(
-                                _supportText(uiPhase)!,
+                                _tutor.headline,
                                 key: ValueKey<String>(
-                                  'assist-support-$uiPhase',
+                                  'assist-headline-${_tutor.step.name}',
                                 ),
-                                style: textTheme.bodyLarge?.copyWith(
-                                  color: colorScheme.onSurface.withValues(
-                                    alpha: 0.72,
-                                  ),
-                                ),
+                                style: textTheme.titleLarge,
                                 textAlign: TextAlign.center,
                               ),
-                            ],
-                            if (uiPhase == AssistUiPhase.intro) ...[
-                              const SizedBox(height: DesignTokens.spaceMd),
-                              Text(
-                                'Hold it steady for a few seconds.',
-                                style: textTheme.bodyLarge?.copyWith(
-                                  color: colorScheme.onSurface.withValues(
-                                    alpha: 0.72,
+                              if (_tutor.supportText != null) ...[
+                                const SizedBox(height: DesignTokens.spaceMd),
+                                Text(
+                                  _tutor.supportText!,
+                                  key: ValueKey<String>(
+                                    'assist-support-${_tutor.step.name}',
                                   ),
+                                  style: textTheme.bodyLarge?.copyWith(
+                                    color: colorScheme.onSurface.withValues(
+                                      alpha: 0.72,
+                                    ),
+                                  ),
+                                  textAlign: TextAlign.center,
                                 ),
-                                textAlign: TextAlign.center,
+                              ],
+                            ],
+                            if (_controller.uiPhase ==
+                                AssistUiPhase.listening) ...[
+                              const SizedBox(height: DesignTokens.spaceXl),
+                              VoiceActivityIndicator(
+                                level: _controller.voiceActivity,
                               ),
                             ],
-                            if (_showRangeGuide &&
-                                rangePoint != null &&
-                                targetPos != null) ...[
-                              const SizedBox(height: DesignTokens.spaceXl),
-                              AssistRangeGuide(
-                                currentPoint: rangePoint,
-                                targetPosition: targetPos,
-                                voicePosition:
-                                    uiPhase == AssistUiPhase.listening
-                                    ? _controller.rangeVoiceGuidePosition
-                                    : null,
-                                matched:
-                                    _controller.didMatchCurrentRangeTarget,
-                              ),
-                            ],
-                            if (uiPhase == AssistUiPhase.listening &&
-                                !_controller.isExploringRange) ...[
-                              const SizedBox(height: DesignTokens.spaceXl),
+                            if (_tutor.showListenProgress) ...[
+                              const SizedBox(height: DesignTokens.spaceLg),
                               _ListenProgress(
                                 progress: _controller.listenProgress,
                                 colorScheme: colorScheme,
                               ),
                             ],
-                            if (errorMessage != null) ...[
-                              const SizedBox(height: DesignTokens.spaceLg),
-                              Text(
-                                errorMessage,
-                                style: textTheme.bodyLarge?.copyWith(
-                                  color: colorScheme.error,
+                            if (_controller.uiPhase ==
+                                    AssistUiPhase.playingReference ||
+                                _controller.uiPhase ==
+                                    AssistUiPhase.assistedSinging) ...[
+                              const SizedBox(height: DesignTokens.spaceXl),
+                              Icon(
+                                Icons.graphic_eq,
+                                size: 36,
+                                color: colorScheme.primary,
+                                key: const ValueKey<String>(
+                                  'assist-playing-icon',
                                 ),
-                                textAlign: TextAlign.center,
                               ),
                             ],
                           ],
@@ -306,350 +276,172 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     );
   }
 
-  String _cycleHint(AssistUiPhase phase) {
-    if (_controller.isExploringRange) {
-      return '';
-    }
-    switch (phase) {
-      case AssistUiPhase.listening:
-        return 'Hold your note';
-      case AssistUiPhase.processing:
-      case AssistUiPhase.showingTransition:
-        return 'Starting point found';
-      case AssistUiPhase.retry:
-        return 'Let\'s try again';
-      case AssistUiPhase.intro:
-      case AssistUiPhase.playingReference:
-      case AssistUiPhase.preparingToListen:
-      case AssistUiPhase.verifying:
-      case AssistUiPhase.startingPointFound:
-      case AssistUiPhase.awaitingComfort:
-      case AssistUiPhase.awaitingLowerAudibility:
-      case AssistUiPhase.awaitingUpperComfort:
-      case AssistUiPhase.exploringNextShruti:
-      case AssistUiPhase.rangeBoundaryReached:
-      case AssistUiPhase.rangeUnresolved:
-      case AssistUiPhase.completed:
-        return '';
-    }
-  }
-
-  /// Primary instruction: what the user should do right now.
-  String _actionCue(AssistUiPhase phase) {
-    if (_controller.isExploringRange ||
-        phase == AssistUiPhase.startingPointFound ||
-        phase == AssistUiPhase.completed) {
-      final point = _controller.currentRangePoint;
-      switch (phase) {
-        case AssistUiPhase.startingPointFound:
-          return 'Let\'s explore your range';
-        case AssistUiPhase.showingTransition:
-          return point == null
-              ? 'Follow the notes with your voice'
-              : 'Next: ${AssistRangeTargets.labelFor(point)}';
-        case AssistUiPhase.playingReference:
-          return 'Listen';
-        case AssistUiPhase.preparingToListen:
-          return 'Get ready';
-        case AssistUiPhase.listening:
-          return 'Follow the target';
-        case AssistUiPhase.processing:
-          return _controller.didMatchCurrentRangeTarget
-              ? 'Got it'
-              : 'Checking…';
-        case AssistUiPhase.awaitingLowerAudibility:
-          return 'Could you hear and match the lower Sa?';
-        case AssistUiPhase.awaitingUpperComfort:
-          return 'How did the upper Sa feel?';
-        case AssistUiPhase.exploringNextShruti:
-          return 'Let\'s check the next Shruti.';
-        case AssistUiPhase.rangeBoundaryReached:
-          return 'We\'ve reached the upper edge of your comfortable range.';
-        case AssistUiPhase.rangeUnresolved:
-          return 'We couldn\'t find a comfortable Shruti yet.';
-        case AssistUiPhase.completed:
-          return 'Your comfortable Shruti';
-        case AssistUiPhase.intro:
-        case AssistUiPhase.verifying:
-        case AssistUiPhase.retry:
-        case AssistUiPhase.awaitingComfort:
-          break;
-      }
-    }
-
-    switch (phase) {
-      case AssistUiPhase.intro:
-        return 'Sing one comfortable note';
-      case AssistUiPhase.playingReference:
-      case AssistUiPhase.verifying:
-      case AssistUiPhase.preparingToListen:
-        return 'Sing one comfortable note';
-      case AssistUiPhase.listening:
-        return 'Sing one comfortable note';
-      case AssistUiPhase.processing:
-      case AssistUiPhase.showingTransition:
-        return 'Got it.';
-      case AssistUiPhase.retry:
-        return "I couldn't catch a steady note.";
-      case AssistUiPhase.startingPointFound:
-        return 'Let\'s explore your range';
-      case AssistUiPhase.awaitingComfort:
-        return 'Follow the target';
-      case AssistUiPhase.awaitingLowerAudibility:
-        return 'Could you hear and match the lower Sa?';
-      case AssistUiPhase.awaitingUpperComfort:
-        return 'How did the upper Sa feel?';
-      case AssistUiPhase.exploringNextShruti:
-        return 'Let\'s check the next Shruti.';
-      case AssistUiPhase.rangeBoundaryReached:
-        return 'We\'ve reached the upper edge of your comfortable range.';
-      case AssistUiPhase.rangeUnresolved:
-        return 'We couldn\'t find a comfortable Shruti yet.';
-      case AssistUiPhase.completed:
-        return 'Your comfortable Shruti';
-    }
-  }
-
-  String? _supportText(AssistUiPhase phase) {
-    if (_controller.isExploringRange ||
-        phase == AssistUiPhase.startingPointFound) {
-      switch (phase) {
-        case AssistUiPhase.startingPointFound:
-          return 'Three notes — low, middle, then high.';
-        case AssistUiPhase.awaitingLowerAudibility:
-          return 'Choose what felt true for you.';
-        case AssistUiPhase.awaitingUpperComfort:
-          return 'There is no wrong answer — just how it felt.';
-        case AssistUiPhase.exploringNextShruti:
-          return 'Same three notes on the next pitch.';
-        case AssistUiPhase.rangeBoundaryReached:
-          final comfortable = _controller.lastComfortableShruti;
-          return comfortable == null
-              ? 'We can stop exploring higher for now.'
-              : 'We\'ll use ${comfortable.label} — the last pitch that felt comfortable.';
-        case AssistUiPhase.rangeUnresolved:
-          return 'We couldn\'t find a comfortable Shruti yet. Try again, or choose one in Default Mode.';
-        case AssistUiPhase.showingTransition:
-        case AssistUiPhase.playingReference:
-        case AssistUiPhase.preparingToListen:
-        case AssistUiPhase.listening:
-        case AssistUiPhase.processing:
-        case AssistUiPhase.awaitingComfort:
-          return null;
-        case AssistUiPhase.completed:
-          return 'This is the last Shruti where the upper Sa felt comfortable.';
-        case AssistUiPhase.intro:
-        case AssistUiPhase.verifying:
-        case AssistUiPhase.retry:
-          break;
-      }
-    }
-
-    switch (phase) {
-      case AssistUiPhase.intro:
-        return null;
-      case AssistUiPhase.playingReference:
-      case AssistUiPhase.verifying:
-      case AssistUiPhase.preparingToListen:
-      case AssistUiPhase.listening:
-        return 'Hold it steady for a few seconds.';
-      case AssistUiPhase.processing:
-      case AssistUiPhase.showingTransition:
-        return 'Let\'s find what feels comfortable for your voice.';
-      case AssistUiPhase.retry:
-        return 'Try again and hold one comfortable note.';
-      case AssistUiPhase.startingPointFound:
-        return 'Three notes — low, middle, then high.';
-      case AssistUiPhase.awaitingComfort:
-        return null;
-      case AssistUiPhase.awaitingLowerAudibility:
-        return 'Choose what felt true for you.';
-      case AssistUiPhase.awaitingUpperComfort:
-        return 'There is no wrong answer — just how it felt.';
-      case AssistUiPhase.exploringNextShruti:
-        return 'Same three notes on the next pitch.';
-      case AssistUiPhase.rangeBoundaryReached:
-        final comfortable = _controller.lastComfortableShruti;
-        return comfortable == null
-            ? 'We can stop exploring higher for now.'
-            : 'We\'ll use ${comfortable.label} — the last pitch that felt comfortable.';
-      case AssistUiPhase.rangeUnresolved:
-        return 'We couldn\'t find a comfortable Shruti yet. Try again, or choose one in Default Mode.';
-      case AssistUiPhase.completed:
-        return 'This is the last Shruti where the upper Sa felt comfortable.';
-    }
-  }
-
   List<Widget> _buildActions() {
-    final busy = _controller.isBusy;
+    final busy = _controller.isBusy || _tutor.isSpeaking;
 
-    switch (_controller.uiPhase) {
-      case AssistUiPhase.intro:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              onPressed: busy ? null : _controller.startSession,
-              child: const Text('Start'),
-            ),
+    if (_tutor.showPlayMyShruti) {
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-play-my-shruti'),
+            onPressed: busy
+                ? null
+                : () {
+                    final pitch = _controller.referencePitch;
+                    Navigator.of(context).pop<Pitch>(pitch);
+                  },
+            child: const Text('Play My Shruti'),
           ),
-        ];
-      case AssistUiPhase.awaitingLowerAudibility:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              key: const ValueKey<String>('assist-lower-audible-yes'),
-              onPressed: busy ? null : _controller.reportLowerSaAudible,
-              child: const Text('Yes'),
-            ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: OutlinedButton(
+            key: const ValueKey<String>('assist-try-again'),
+            onPressed: busy ? null : _tutor.tryAgain,
+            child: const Text('Try Again'),
           ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              key: const ValueKey<String>('assist-lower-too-low'),
-              onPressed: busy ? null : _controller.reportLowerSaTooLow,
-              child: const Text('No, it was too low'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.awaitingUpperComfort:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              key: const ValueKey<String>('assist-upper-comfortable'),
-              onPressed: busy ? null : _controller.reportUpperSaComfortable,
-              child: const Text('Comfortable'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              key: const ValueKey<String>('assist-upper-strained'),
-              onPressed: busy ? null : _controller.reportUpperSaStrained,
-              child: const Text('It felt strained'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.rangeBoundaryReached:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              key: const ValueKey<String>('assist-boundary-continue'),
-              onPressed: busy ? null : _controller.acknowledgeRangeBoundary,
-              child: const Text('Continue'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.rangeUnresolved:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              key: const ValueKey<String>('assist-unresolved-try-again'),
-              onPressed: busy ? null : _controller.tryAgain,
-              child: const Text('Try Again'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.playingReference:
-      case AssistUiPhase.verifying:
-      case AssistUiPhase.preparingToListen:
-      case AssistUiPhase.listening:
-      case AssistUiPhase.processing:
-      case AssistUiPhase.showingTransition:
-      case AssistUiPhase.startingPointFound:
-      case AssistUiPhase.awaitingComfort:
-      case AssistUiPhase.exploringNextShruti:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.retry:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              onPressed: busy ? null : _controller.retryRound,
-              child: const Text('Try again'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              onPressed: busy ? null : _controller.stopSession,
-              child: const Text('Stop'),
-            ),
-          ),
-        ];
-      case AssistUiPhase.completed:
-        return [
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: FilledButton(
-              key: const ValueKey<String>('assist-play-my-shruti'),
-              onPressed: busy
-                  ? null
-                  : () {
-                      final pitch = _controller.referencePitch;
-                      Navigator.of(context).pop<Pitch>(pitch);
-                    },
-              child: const Text('Play My Shruti'),
-            ),
-          ),
-          const SizedBox(height: DesignTokens.spaceMd),
-          SizedBox(
-            height: DesignTokens.controlHeight,
-            child: OutlinedButton(
-              key: const ValueKey<String>('assist-try-again'),
-              onPressed: busy ? null : _controller.tryAgain,
-              child: const Text('Try Again'),
-            ),
-          ),
-        ];
+        ),
+      ];
     }
+
+    if (_tutor.showSessionStopped) {
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-session-stopped-try-again'),
+            onPressed: _tutor.tryAgain,
+            child: const Text('Try Again'),
+          ),
+        ),
+      ];
+    }
+
+    if (_tutor.showYesNoFallback) {
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-lower-audible-yes'),
+            onPressed: busy ? null : () => _tutor.answerLowerAudibility(true),
+            child: const Text('Yes'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: OutlinedButton(
+            key: const ValueKey<String>('assist-lower-too-low'),
+            onPressed: busy ? null : () => _tutor.answerLowerAudibility(false),
+            child: const Text('No'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        _stopButton(),
+      ];
+    }
+
+    if (_tutor.showComfortFallback) {
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-upper-comfortable'),
+            onPressed: busy ? null : () => _tutor.answerUpperComfort(true),
+            child: const Text('Comfortable'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: OutlinedButton(
+            key: const ValueKey<String>('assist-upper-strained'),
+            onPressed: busy ? null : () => _tutor.answerUpperComfort(false),
+            child: const Text('Not comfortable'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        _stopButton(),
+      ];
+    }
+
+    if (_tutor.showTryAgain) {
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-unresolved-try-again'),
+            onPressed: busy
+                ? null
+                : () {
+                    if (_tutor.step == TutorStep.startingNoteFailure) {
+                      _tutor.retryStartingNote();
+                    } else {
+                      _tutor.tryAgain();
+                    }
+                  },
+            child: const Text('Try Again'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        _stopButton(),
+      ];
+    }
+
+    if (_tutor.showStop) {
+      return [_stopButton()];
+    }
+
+    // Welcome — no CTA; voice auto-continues.
+    return const [];
+  }
+
+  Widget _stopButton() {
+    return SizedBox(
+      height: DesignTokens.controlHeight,
+      child: OutlinedButton(
+        key: const ValueKey<String>('assist-stop'),
+        onPressed: _tutor.stop,
+        child: const Text('Stop'),
+      ),
+    );
+  }
+}
+
+class _CountdownDisplay extends StatelessWidget {
+  const _CountdownDisplay({
+    required this.value,
+    required this.colorScheme,
+    required this.textTheme,
+  });
+
+  final int value;
+  final ColorScheme colorScheme;
+  final TextTheme textTheme;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = '$value';
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 220),
+      layoutBuilder: (currentChild, previousChildren) {
+        return currentChild ?? const SizedBox.shrink();
+      },
+      transitionBuilder: (child, animation) {
+        return FadeTransition(opacity: animation, child: child);
+      },
+      child: Text(
+        label,
+        key: ValueKey<String>('tutor-countdown-$label'),
+        style: textTheme.displaySmall?.copyWith(
+          color: colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+        textAlign: TextAlign.center,
+      ),
+    );
   }
 }
 
@@ -661,30 +453,15 @@ class _ListenProgress extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Icon(Icons.mic, size: 36, color: colorScheme.primary),
-        const SizedBox(height: DesignTokens.spaceMd),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
-          child: LinearProgressIndicator(
-            key: const ValueKey<String>('assist-listen-progress'),
-            value: progress.clamp(0.0, 1.0),
-            minHeight: 8,
-            backgroundColor: colorScheme.primary.withValues(alpha: 0.16),
-            color: colorScheme.primary,
-          ),
-        ),
-        const SizedBox(height: DesignTokens.spaceSm),
-        Text(
-          'Keep singing…',
-          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-            color: colorScheme.primary,
-            fontWeight: FontWeight.w600,
-          ),
-          textAlign: TextAlign.center,
-        ),
-      ],
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+      child: LinearProgressIndicator(
+        key: const ValueKey<String>('assist-listen-progress'),
+        value: progress.clamp(0.0, 1.0),
+        minHeight: 8,
+        backgroundColor: colorScheme.primary.withValues(alpha: 0.16),
+        color: colorScheme.primary,
+      ),
     );
   }
 }
