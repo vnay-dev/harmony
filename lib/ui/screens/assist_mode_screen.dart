@@ -11,7 +11,7 @@ import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
-import 'package:harmony/tutor/flutter_tutor_voice.dart';
+import 'package:harmony/tutor/asset_tutor_voice.dart';
 import 'package:harmony/tutor/speech_to_text_recognizer.dart';
 import 'package:harmony/tutor/tutor_session.dart';
 import 'package:harmony/tutor/tutor_speech_recognizer.dart';
@@ -123,7 +123,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     } else {
       _tutor = TutorSession(
         engine: _controller,
-        voice: widget._tutorVoice ?? FlutterTutorVoice(),
+        voice: widget._tutorVoice ?? AssetTutorVoice(),
         speechRecognizer:
             widget._speechRecognizer ?? SpeechToTextTutorRecognizer(),
         timing: widget.tutorTiming ?? const TutorTimingConfig(),
@@ -189,6 +189,14 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
+                            if (_tutor.showJourneyProgress) ...[
+                              _TutorJourneyProgress(
+                                tutor: _tutor,
+                                textTheme: textTheme,
+                                colorScheme: colorScheme,
+                              ),
+                              const SizedBox(height: DesignTokens.spaceXl),
+                            ],
                             if (_tutor.confirmedShrutiLabel != null) ...[
                               Text(
                                 _tutor.confirmedShrutiLabel!,
@@ -319,6 +327,35 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       ];
     }
 
+    if (_tutor.showDifferentSoundChoice) {
+      final canAnswer = _tutor.canAnswerDifferentSound;
+      return [
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: FilledButton(
+            key: const ValueKey<String>('assist-different-sound-yes'),
+            onPressed: canAnswer
+                ? () => _tutor.answerDifferentSound(true)
+                : null,
+            child: const Text('Yes'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        SizedBox(
+          height: DesignTokens.controlHeight,
+          child: OutlinedButton(
+            key: const ValueKey<String>('assist-different-sound-no'),
+            onPressed: canAnswer
+                ? () => _tutor.answerDifferentSound(false)
+                : null,
+            child: const Text('No'),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        _stopButton(),
+      ];
+    }
+
     if (_tutor.showYesNoFallback) {
       return [
         SizedBox(
@@ -405,6 +442,132 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
         key: const ValueKey<String>('assist-stop'),
         onPressed: _tutor.stop,
         child: const Text('Stop'),
+      ),
+    );
+  }
+}
+
+class _TutorJourneyProgress extends StatelessWidget {
+  const _TutorJourneyProgress({
+    required this.tutor,
+    required this.textTheme,
+    required this.colorScheme,
+  });
+
+  final TutorSession tutor;
+  final TextTheme textTheme;
+  final ColorScheme colorScheme;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey<String>('tutor-journey'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          TutorSession.journeyHeading,
+          key: const ValueKey<String>('tutor-journey-heading'),
+          style: textTheme.bodyLarge?.copyWith(
+            color: colorScheme.onSurface.withValues(alpha: 0.62),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceSm),
+        for (final stage in TutorJourneyStage.values)
+          _JourneyStageRow(
+            stage: stage,
+            mark: tutor.journeyMark(stage),
+            label: TutorSession.journeyLabel(stage),
+            textTheme: textTheme,
+            colorScheme: colorScheme,
+          ),
+      ],
+    );
+  }
+}
+
+class _JourneyStageRow extends StatelessWidget {
+  const _JourneyStageRow({
+    required this.stage,
+    required this.mark,
+    required this.label,
+    required this.textTheme,
+    required this.colorScheme,
+  });
+
+  final TutorJourneyStage stage;
+  final TutorJourneyMark mark;
+  final String label;
+  final TextTheme textTheme;
+  final ColorScheme colorScheme;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = mark == TutorJourneyMark.current;
+    final complete = mark == TutorJourneyMark.complete;
+    final labelColor = colorScheme.onSurface.withValues(
+      alpha: current ? 1 : (complete ? 0.62 : 0.38),
+    );
+    final markColor = current
+        ? colorScheme.primary
+        : colorScheme.onSurface.withValues(alpha: complete ? 0.45 : 0.28);
+    final spokenMark = switch (mark) {
+      TutorJourneyMark.complete => 'Completed',
+      TutorJourneyMark.current => 'Current',
+      TutorJourneyMark.upcoming => 'Later',
+    };
+
+    return Semantics(
+      container: true,
+      label: '$spokenMark, $label',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: DesignTokens.spaceXs),
+        child: Row(
+          key: ValueKey<String>('tutor-journey-${stage.name}-${mark.name}'),
+          children: [
+            ExcludeSemantics(
+              child: _JourneyMark(mark: mark, color: markColor),
+            ),
+            const SizedBox(width: DesignTokens.spaceSm),
+            Expanded(
+              child: Text(
+                label,
+                style: textTheme.bodyLarge?.copyWith(
+                  color: labelColor,
+                  fontWeight: current ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _JourneyMark extends StatelessWidget {
+  const _JourneyMark({required this.mark, required this.color});
+
+  final TutorJourneyMark mark;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = switch (mark) {
+      TutorJourneyMark.complete => Icons.check,
+      TutorJourneyMark.current => Icons.circle,
+      TutorJourneyMark.upcoming => Icons.circle_outlined,
+    };
+    final size = switch (mark) {
+      TutorJourneyMark.complete => 16.0,
+      TutorJourneyMark.current => 10.0,
+      TutorJourneyMark.upcoming => 8.0,
+    };
+    return SizedBox(
+      width: 20,
+      height: 20,
+      child: Center(
+        child: Icon(icon, size: size, color: color),
       ),
     );
   }

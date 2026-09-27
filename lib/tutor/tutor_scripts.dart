@@ -11,6 +11,15 @@ class TutorScripts {
     'Just follow my voice.',
   ];
 
+  /// Spoken once per session, after welcome and before [discoverIntro].
+  static const orientation = <String>[
+    "First, I'll listen to your voice.",
+    "Then, we'll explore a few sounds around it.",
+    "You'll tell me how each one feels.",
+    "We'll keep going until we find a comfortable place for your voice.",
+    "There's no right or wrong answer. Just sing naturally and tell me how it feels.",
+  ];
+
   static const discoverIntro = <String>[
     "Let's begin gently.",
     'Sing or hum one comfortable sound.',
@@ -102,6 +111,26 @@ class TutorScripts {
   /// Another practice pass when assisted singing could not confirm the singer.
   static const practiceOnceMore =
       "That's okay. Let's practice that sound together once more.";
+
+  /// After assisted practice, before offering a nearby sound.
+  static const makeThisEasier = "That's okay. Let's make this a little easier.";
+
+  /// Yes/No question after a sound did not feel right.
+  ///
+  /// Does not name pitch, notes, or targets.
+  static const offerDifferentSound =
+      "That sound didn't feel quite right. Would you like to try a different one?";
+
+  /// Spoken when the user agrees to leave the stuck sound.
+  static const tryThisSound = "Lovely. Let's try this one.";
+
+  /// Spoken when the user wants to keep the current sound.
+  static const stayWithThisSound =
+      "That's perfectly okay. Let's stay with this one for now.";
+
+  /// Returns to Stage 1 listening without restarting the session.
+  static const stepBackToVoice =
+      "Let's take a small step back and listen to your voice once more.";
 
   static const letMeHelp = <String>['Let me help you.', 'Listen once more.'];
 

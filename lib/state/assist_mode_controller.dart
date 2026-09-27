@@ -147,6 +147,20 @@ class AssistModeController extends ChangeNotifier {
   /// How many times the current Stage 2 range point failed to match.
   int _rangePointFailureCount = 0;
   int _assistedAttempts = 0;
+
+  /// True after the user agreed to leave one stuck sound in this episode.
+  ///
+  /// Cleared when that new sound is matched, or when Stage 1 listens again.
+  bool _movedForRecovery = false;
+
+  /// True after the user chose to stay with the current sound.
+  bool _soundChangeDeclined = false;
+
+  /// One assisted pass requested by [declineDifferentSound].
+  bool _forceAssistedPass = false;
+
+  /// Skip the next directional range intro. The solo reference still plays.
+  bool _suppressNextRangeIntro = false;
   AssistRecoveryMode _recoveryMode = AssistRecoveryMode.normal;
   AssistCountdownKind _countdownKind = AssistCountdownKind.soloRetry;
 
@@ -293,10 +307,20 @@ class AssistModeController extends ChangeNotifier {
   bool get canIsolateUserFromReference => assistedUserVocalIsolationAvailable;
 
   /// Solo attempts before Harmony switches from "try again" to sing-along.
+  ///
+  /// The first miss is an ordinary retry. The next miss starts assisted
+  /// practice. A miss after that practice changes strategy instead of ending.
   static const int soloMissesBeforeAssistance = 2;
 
-  /// Assisted sing-along cycles before the existing unresolved fallback.
-  static const int maxAssistedAttemptsPerPoint = 2;
+  /// True when the next range intro should not name a direction.
+  ///
+  /// Set after the user agrees to try a nearby sound. The tutor consumes it.
+  bool get suppressNextRangeIntro => _suppressNextRangeIntro;
+
+  /// Clears [suppressNextRangeIntro] once the tutor has skipped that intro.
+  void consumeRangeIntroSuppression() {
+    _suppressNextRangeIntro = false;
+  }
 
   /// Spoken/visual countdown value (3, 2, or 1). Null outside countdown.
   int? get countdownValue => _countdownValue;
@@ -348,6 +372,7 @@ class AssistModeController extends ChangeNotifier {
     _stage1FailureCount = 0;
     _rangePointFailureCount = 0;
     _assistedAttempts = 0;
+    _clearRecoveryEpisode();
     _countdownValue = null;
     _stage1GuidedDemoPending = false;
     _referencePitch = initialReferencePitch;
@@ -450,6 +475,7 @@ class AssistModeController extends ChangeNotifier {
     _stage1FailureCount = 0;
     _rangePointFailureCount = 0;
     _assistedAttempts = 0;
+    _clearRecoveryEpisode();
     _countdownValue = null;
     _stage1GuidedDemoPending = false;
     _referencePitch = initialReferencePitch;
@@ -741,6 +767,8 @@ class AssistModeController extends ChangeNotifier {
       if (_uiPhase == AssistUiPhase.completed ||
           _uiPhase == AssistUiPhase.retry ||
           _uiPhase == AssistUiPhase.intro ||
+          _uiPhase == AssistUiPhase.refreshingStartingNote ||
+          _uiPhase == AssistUiPhase.offeringEasierSound ||
           _stage == AssistStage.exploringRange) {
         return;
       }
@@ -1013,6 +1041,8 @@ class AssistModeController extends ChangeNotifier {
     _rangeVoiceHz = null;
     _rangePointFailureCount = 0;
     _assistedAttempts = 0;
+    _soundChangeDeclined = false;
+    _forceAssistedPass = false;
     final result = AssistCandidateRangeResult(candidate);
     _activeCandidateResult = result;
     _testedCandidates.add(result);
@@ -1041,7 +1071,9 @@ class AssistModeController extends ChangeNotifier {
       _uiPhase == AssistUiPhase.awaitingLowerAudibility ||
       _uiPhase == AssistUiPhase.awaitingUpperComfort ||
       _uiPhase == AssistUiPhase.rangeBoundaryReached ||
-      _uiPhase == AssistUiPhase.rangeUnresolved;
+      _uiPhase == AssistUiPhase.rangeUnresolved ||
+      _uiPhase == AssistUiPhase.offeringEasierSound ||
+      _uiPhase == AssistUiPhase.refreshingStartingNote;
 
   /// Stage 2: play one range point → settle → countdown → listen for match.
   ///
@@ -1063,30 +1095,20 @@ class AssistModeController extends ChangeNotifier {
     _rangeMatchAccepted = false;
     _rangeVoiceHz = null;
 
+    final forcedAssist = _forceAssistedPass;
+    if (_forceAssistedPass) {
+      _forceAssistedPass = false;
+    }
     final useAssisted =
-        _rangePointFailureCount >= soloMissesBeforeAssistance &&
-        _assistedAttempts < maxAssistedAttemptsPerPoint;
+        forcedAssist ||
+        (_rangePointFailureCount >= soloMissesBeforeAssistance &&
+            _assistedAttempts == 0);
 
     if (useAssisted) {
       final assisted = await _runAssistedSinging(generation, targetHz);
-      if (assisted == AssistedSingResult.stopped || !_isActive(generation)) {
+      if (assisted != AssistedSingResult.readyForSolo ||
+          !_isActive(generation)) {
         return false;
-      }
-      if (assisted == AssistedSingResult.unconfirmed) {
-        _assistedAttempts += 1;
-        await tutorHooks?.afterAssistedPracticeUnconfirmed?.call();
-        if (!_isActive(generation)) {
-          return false;
-        }
-        if (_assistedAttempts >= maxAssistedAttemptsPerPoint) {
-          _recoveryMode = AssistRecoveryMode.normal;
-          _setPhase(AssistUiPhase.rangeUnresolved);
-          notifyListeners();
-          return _isActive(generation);
-        }
-        _setPhase(AssistUiPhase.showingTransition);
-        await _awaitPhase(timing.transitionDuration, generation);
-        return _isActive(generation);
       }
     } else {
       // 0) Tutor speaks first — never overlaps reference audio.
@@ -1210,10 +1232,13 @@ class AssistModeController extends ChangeNotifier {
           'failures=$_rangePointFailureCount — retry same point',
         );
       }
-      if (_assistedAttempts >= maxAssistedAttemptsPerPoint) {
+      if (useAssisted) {
         _recoveryMode = AssistRecoveryMode.normal;
-        _setPhase(AssistUiPhase.rangeUnresolved);
-        notifyListeners();
+        if (_movedForRecovery || _soundChangeDeclined) {
+          _enterStartingNoteRefresh();
+          return _isActive(generation);
+        }
+        _setPhase(AssistUiPhase.offeringEasierSound);
         return _isActive(generation);
       }
       _setPhase(AssistUiPhase.showingTransition);
@@ -1223,6 +1248,9 @@ class AssistModeController extends ChangeNotifier {
 
     _rangePointFailureCount = 0;
     _assistedAttempts = 0;
+    _movedForRecovery = false;
+    _soundChangeDeclined = false;
+    _forceAssistedPass = false;
 
     if (kDebugMode) {
       debugPrint(
@@ -1269,12 +1297,11 @@ class AssistModeController extends ChangeNotifier {
     }
   }
 
-  /// Plays the reference while the user sings along.
+  /// Plays the reference while the user sings along, then hands off to solo.
   ///
-  /// Returns [AssistedSingResult.confirmed] only when the user's voice can be
-  /// isolated from the speaker. This build cannot do that, so the practice
-  /// window ending is [AssistedSingResult.unconfirmed]. Pitch heard during
-  /// playback is never a match. Solo verification runs only after confirmation.
+  /// Pitch matching stays off for the whole practice window. The window ending
+  /// is not a success or a failure. [AssistedSingResult.readyForSolo] means
+  /// the caller should run the existing solo countdown and listen.
   Future<AssistedSingResult> _runAssistedSinging(
     int generation,
     double targetHz,
@@ -1314,10 +1341,9 @@ class AssistModeController extends ChangeNotifier {
     } on AudioServiceException catch (_) {
       _errorMessage = "That's okay. Let's try that once more.";
       _recoveryMode = AssistRecoveryMode.normal;
+      await _resetToIntro();
       notifyListeners();
-      return _isActive(generation)
-          ? AssistedSingResult.unconfirmed
-          : AssistedSingResult.stopped;
+      return AssistedSingResult.stopped;
     }
 
     await _awaitPhase(timing.assistedSingWindow, generation);
@@ -1332,12 +1358,19 @@ class AssistModeController extends ChangeNotifier {
     _targetMatcher.stop();
     _rangeMatchAccepted = false;
 
-    // The reference player and the microphone capture do not share an echo
-    // reference. A pitch detected here would be the speaker, the room, or a
-    // mix — not evidence the user held the note. Confirmation stays unreachable
-    // until [canIsolateUserFromReference] is true.
+    // The reference and the microphone do not share an echo reference.
+    // This window is practice only. Scoring happens on the solo listen.
+    _setPhase(AssistUiPhase.preparingToListen);
     _recoveryMode = AssistRecoveryMode.normal;
-    return AssistedSingResult.unconfirmed;
+    await _awaitPhase(timing.settlingDuration, generation);
+    if (!_isActive(generation)) {
+      return AssistedSingResult.stopped;
+    }
+    await tutorHooks?.afterAssistedSinging?.call();
+    if (!_isActive(generation)) {
+      return AssistedSingResult.stopped;
+    }
+    return AssistedSingResult.readyForSolo;
   }
 
   /// Stops capture and playback focus so speech recognition can use the mic.
@@ -1469,7 +1502,185 @@ class AssistModeController extends ChangeNotifier {
     _lowerSideAccessible = false;
     _rangePointFailureCount = 0;
     _assistedAttempts = 0;
+    _clearRecoveryEpisode();
     _targetMatcher.stop();
+  }
+
+  void _clearRecoveryEpisode() {
+    _movedForRecovery = false;
+    _soundChangeDeclined = false;
+    _forceAssistedPass = false;
+    _suppressNextRangeIntro = false;
+  }
+
+  /// Nearby supported Shruti in the current search direction.
+  ///
+  /// Uses [nextHigherSupportedShruti] and [nextLowerSupportedShruti] only.
+  /// When the preferred step is already at the edge, the other existing step
+  /// is used so one stuck sound does not end discovery.
+  Pitch? _nearbyRecoveryShruti(Pitch current) {
+    final preferHigher = switch (_searchMode) {
+      AssistShrutiSearchMode.seekingLower => false,
+      AssistShrutiSearchMode.climbing ||
+      AssistShrutiSearchMode.seekingHigher => true,
+      AssistShrutiSearchMode.initial =>
+        _currentRangePoint != AssistRangePoint.upperSa,
+    };
+    final primary = preferHigher
+        ? nextHigherSupportedShruti(current)
+        : nextLowerSupportedShruti(current);
+    if (primary != null) {
+      return primary;
+    }
+    return preferHigher
+        ? nextLowerSupportedShruti(current)
+        : nextHigherSupportedShruti(current);
+  }
+
+  /// Leaves the stuck sound for the next supported candidate, then solos.
+  ///
+  /// Valid only from [AssistUiPhase.offeringEasierSound].
+  Future<void> acceptDifferentSound() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.offeringEasierSound ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    _isBusy = true;
+    notifyListeners();
+
+    final generation = _sessionGeneration;
+    final current = _currentCandidate;
+    final next = current == null ? null : _nearbyRecoveryShruti(current);
+    _movedForRecovery = true;
+    _soundChangeDeclined = false;
+    _forceAssistedPass = false;
+    _recoveryMode = AssistRecoveryMode.normal;
+
+    if (next == null) {
+      _isBusy = false;
+      if (!_isDisposed) {
+        notifyListeners();
+      }
+      _enterStartingNoteRefresh();
+      return;
+    }
+
+    _setPhase(AssistUiPhase.exploringNextShruti);
+    try {
+      await _awaitPhase(timing.transitionDuration, generation);
+      if (!_isActive(generation)) {
+        return;
+      }
+      _prepareCandidate(next);
+      _suppressNextRangeIntro = true;
+      _movedForRecovery = true;
+
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag RECOVERY_NEARBY from=${current?.label} '
+          'to=${next.label} mode=${_searchMode.name}',
+        );
+      }
+
+      _setPhase(AssistUiPhase.showingTransition);
+      await _awaitPhase(timing.transitionDuration, generation);
+    } finally {
+      _isBusy = false;
+      if (!_isDisposed) {
+        notifyListeners();
+      }
+    }
+
+    if (!_isActive(generation)) {
+      return;
+    }
+    await _runRangeTestLoop(generation);
+  }
+
+  /// Keeps the current sound and runs one more assisted practice pass.
+  ///
+  /// Valid only from [AssistUiPhase.offeringEasierSound].
+  Future<void> declineDifferentSound() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.offeringEasierSound ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    _isBusy = true;
+    notifyListeners();
+
+    final generation = _sessionGeneration;
+    _soundChangeDeclined = true;
+    _forceAssistedPass = true;
+    _recoveryMode = AssistRecoveryMode.normal;
+    _setPhase(AssistUiPhase.showingTransition);
+
+    _isBusy = false;
+    if (!_isDisposed) {
+      notifyListeners();
+    }
+    if (!_isActive(generation)) {
+      return;
+    }
+    await _runRangeTestLoop(generation);
+  }
+
+  /// Pauses Stage 2 and waits for a fresh Stage 1 starting note.
+  ///
+  /// Does not end the session or clear the tutor conversation.
+  void _enterStartingNoteRefresh() {
+    _stage = AssistStage.findingStart;
+    _currentCandidate = null;
+    _rangeTargets = null;
+    _currentRangePoint = null;
+    _rangeMatchAccepted = false;
+    _rangeVoiceHz = null;
+    _activeCandidateResult = null;
+    _rangePointFailureCount = 0;
+    _assistedAttempts = 0;
+    _clearRecoveryEpisode();
+    _stage1FailureCount = 0;
+    _stage1GuidedDemoPending = false;
+    _recoveryMode = AssistRecoveryMode.normal;
+    _countdownKind = AssistCountdownKind.soloRetry;
+    _targetMatcher.stop();
+    _disablePitchAnalysis();
+    _setPhase(AssistUiPhase.refreshingStartingNote);
+  }
+
+  /// Continues the same session with Stage 1 listening.
+  ///
+  /// Valid only from [AssistUiPhase.refreshingStartingNote].
+  Future<void> continueStartingNoteDiscovery() async {
+    if (_isBusy ||
+        _isDisposed ||
+        !_isSessionActive ||
+        _uiPhase != AssistUiPhase.refreshingStartingNote ||
+        _stage != AssistStage.findingStart) {
+      return;
+    }
+
+    _isBusy = true;
+    notifyListeners();
+
+    final generation = _sessionGeneration;
+    _stage1FailureCount = 0;
+    _stage1GuidedDemoPending = false;
+    _setPhase(AssistUiPhase.showingTransition);
+
+    _isBusy = false;
+    if (!_isDisposed) {
+      notifyListeners();
+    }
+    if (!_isActive(generation)) {
+      return;
+    }
+    await _runRoundLoop(generation);
   }
 
   bool _isActive(int generation) =>

@@ -43,19 +43,15 @@ enum AssistCountdownKind {
 }
 
 /// Result of one assisted sing-along pass.
+///
+/// The practice window never scores the singer. [readyForSolo] means the
+/// reference has stopped and the caller should run the normal solo listen.
 enum AssistedSingResult {
   /// Stop or a stale generation ended the pass.
   stopped,
 
-  /// The practice window ended without a confirmed user match.
-  ///
-  /// This is the only result while the capture path cannot separate the
-  /// singer from the speaker. The timer is a bound, not evidence the user
-  /// learned the sound.
-  unconfirmed,
-
-  /// The user's voice was isolated from the speaker and held the target.
-  confirmed,
+  /// Practice finished with pitch matching still off. Solo verification follows.
+  readyForSolo,
 }
 
 /// How a struggled range point is being taught.
@@ -146,6 +142,16 @@ enum AssistUiPhase {
 
   /// Climbing stopped at a strained Upper Sa; last comfortable is ready.
   rangeBoundaryReached,
+
+  /// Assisted practice still did not settle. Ask about a nearby sound.
+  ///
+  /// Pitch matching stays off. The range loop waits for Yes or No.
+  offeringEasierSound,
+
+  /// Repeated difficulty after a nearby sound. Capture a fresh starting note.
+  ///
+  /// This is not a new session. Welcome and orientation are not replayed.
+  refreshingStartingNote,
 
   /// No comfortable Shruti found within supported bounds.
   rangeUnresolved,

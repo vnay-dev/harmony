@@ -167,6 +167,20 @@ void main() {
     await tutor.begin();
 
     expect(voice.spoken.take(3), TutorScripts.welcome);
+    expect(
+      voice.spoken
+          .skip(TutorScripts.welcome.length)
+          .take(TutorScripts.orientation.length),
+      TutorScripts.orientation,
+    );
+    final orientationAt = voice.spoken.indexOf(TutorScripts.orientation.first);
+    final discoverAt = voice.spoken.indexOf(TutorScripts.discoverIntro.first);
+    expect(orientationAt, TutorScripts.welcome.length);
+    expect(discoverAt, greaterThan(orientationAt));
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.orientation.first),
+      hasLength(1),
+    );
     expect(voice.spoken, containsAll(TutorScripts.discoverIntro));
     expect(engine.stage1Shruti, Pitch.g);
   });
@@ -604,19 +618,17 @@ void main() {
     expect(voice.spoken, contains(TutorScripts.rangeRetryOnce));
     expect(voice.spoken, contains(TutorScripts.practiceTogether));
     expect(voice.spoken, contains(TutorScripts.singAlongWithMe));
-    expect(voice.spoken, contains(TutorScripts.practiceOnceMore));
+    expect(voice.spoken, contains(TutorScripts.tryOnYourOwn));
+    expect(voice.spoken, isNot(contains(TutorScripts.practiceOnceMore)));
     expect(voice.spoken, isNot(contains(TutorScripts.assistedReady)));
-    expect(voice.spoken, isNot(contains(TutorScripts.tryOnYourOwn)));
     final practice = voice.spoken.indexOf(TutorScripts.practiceTogether);
     final along = voice.spoken.indexOf(TutorScripts.singAlongWithMe);
+    final onYourOwn = voice.spoken.indexOf(TutorScripts.tryOnYourOwn);
     expect(practice, greaterThanOrEqualTo(0));
     expect(along, greaterThan(practice));
-    expect(
-      voice.spoken.where((line) => line == TutorScripts.singAlongWithMe).length,
-      greaterThan(0),
-    );
+    expect(onYourOwn, greaterThan(along));
     expect(engine.canIsolateUserFromReference, isFalse);
-    expect(engine.uiPhase, AssistUiPhase.rangeUnresolved);
+    expect(engine.uiPhase, AssistUiPhase.awaitingUpperComfort);
   });
 
   test('stop during countdown does not start listening', () async {
@@ -1048,6 +1060,11 @@ void main() {
     late final AssistModeController engine;
     var paSolos = 0;
     var sawTogetherCountdown = false;
+    var sawSoloCountdownAfterHandoff = false;
+    var analysisDuringAssist = true;
+    var analysisDuringSoloCountdown = true;
+    var analysisDuringSoloListen = false;
+    var handoffSpoken = false;
     engine = buildEngine(
       timing: countdownTiming,
       wait: (duration) async {
@@ -1055,12 +1072,20 @@ void main() {
             engine.countdownKind == AssistCountdownKind.singTogether) {
           sawTogetherCountdown = true;
           expect(engine.countdownValue, isNot(0));
+          expect(engine.isPitchAnalysisEnabled, isFalse);
           return;
         }
         if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          analysisDuringAssist = engine.isPitchAnalysisEnabled;
           expect(referenceSound.isPlaying, isTrue);
-          expect(engine.isPitchAnalysisEnabled, isFalse);
           expect(engine.recoveryMode, AssistRecoveryMode.assistedSinging);
+          return;
+        }
+        if (engine.uiPhase == AssistUiPhase.countdown &&
+            engine.countdownKind == AssistCountdownKind.soloRetry &&
+            voice.spoken.contains(TutorScripts.tryOnYourOwn)) {
+          sawSoloCountdownAfterHandoff = true;
+          analysisDuringSoloCountdown = engine.isPitchAnalysisEnabled;
           return;
         }
         if (engine.uiPhase != AssistUiPhase.listening) {
@@ -1078,7 +1103,16 @@ void main() {
           return;
         }
         paSolos += 1;
-        await emitHz(detectionService, frequencyHzForPitch(Pitch.c));
+        if (paSolos <= 2) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.c));
+          return;
+        }
+        analysisDuringSoloListen = engine.isPitchAnalysisEnabled;
+        handoffSpoken = voice.spoken.contains(TutorScripts.tryOnYourOwn);
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
       },
     );
     addTearDown(engine.dispose);
@@ -1089,15 +1123,32 @@ void main() {
     await engine.reportLowerSaAudible();
 
     expect(sawTogetherCountdown, isTrue);
-    expect(paSolos, 2);
+    expect(sawSoloCountdownAfterHandoff, isTrue);
+    expect(analysisDuringAssist, isFalse);
+    expect(analysisDuringSoloCountdown, isFalse);
+    expect(analysisDuringSoloListen, isTrue);
+    expect(handoffSpoken, isTrue);
+    expect(paSolos, greaterThan(2));
     expect(voice.spoken, contains(TutorScripts.assistedCountdown.first));
-    expect(voice.spoken, contains('2...'));
-    expect(voice.spoken, contains('1...'));
+    expect(voice.spoken, contains(TutorScripts.tryOnYourOwn));
+    expect(voice.spoken, contains(TutorScripts.countdown.first));
+    final onYourOwn = voice.spoken.indexOf(TutorScripts.tryOnYourOwn);
+    final soloCountdown = voice.spoken.indexOf(
+      TutorScripts.countdown.first,
+      onYourOwn,
+    );
+    expect(onYourOwn, greaterThan(0));
+    expect(
+      soloCountdown,
+      greaterThan(onYourOwn),
+      reason: 'solo countdown follows the handoff',
+    );
     expect(voice.spoken, isNot(contains('Get ready.')));
     expect(voice.spoken, isNot(contains('Go')));
     expect(voice.spoken, isNot(contains(TutorScripts.assistedReady)));
+    expect(voice.spoken, isNot(contains(TutorScripts.practiceOnceMore)));
     expect(engine.canIsolateUserFromReference, isFalse);
-    expect(engine.uiPhase, AssistUiPhase.rangeUnresolved);
+    expect(engine.uiPhase, AssistUiPhase.awaitingUpperComfort);
     expect(referenceSound.isPlaying, isFalse);
   });
 
@@ -1154,4 +1205,741 @@ void main() {
       expect(paSolos, 2);
     },
   );
+
+  test(
+    'orientation does not start pitch detection or reference audio',
+    () async {
+      late final AssistModeController engine;
+      late final TutorSession tutor;
+      var checkedDuringOrientation = false;
+      engine = buildEngine(
+        wait: phasedWait(
+          () => engine,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening && !engine.isExploringRange) {
+              await emitPitch(detectionService, Pitch.g);
+            }
+          },
+        ),
+      );
+      addTearDown(engine.dispose);
+
+      voice.onSpeak = (text) async {
+        if (text != TutorScripts.orientation.last) {
+          return;
+        }
+        checkedDuringOrientation = true;
+        expect(tutor.step, TutorStep.orientation);
+        expect(tutor.journeyStage, TutorJourneyStage.listenToVoice);
+        expect(engine.isSessionActive, isFalse);
+        expect(engine.uiPhase, AssistUiPhase.intro);
+        expect(engine.isPitchAnalysisEnabled, isFalse);
+        expect(detectionService.isListening, isFalse);
+        expect(referenceSound.playCount, 0);
+        expect(referenceSound.isPlaying, isFalse);
+        expect(audioService.playCount, 0);
+        expect(voice.spoken, isNot(contains(TutorScripts.discoverIntro.first)));
+        expect(voice.spoken, isNot(contains(TutorScripts.countdown.first)));
+        expect(voice.spoken, isNot(contains(TutorScripts.listenFirst)));
+        expect(voice.spoken, isNot(contains(TutorScripts.singAlongWithMe)));
+      };
+      tutor = buildTutor(engine);
+      addTearDown(tutor.dispose);
+
+      await tutor.begin();
+
+      expect(checkedDuringOrientation, isTrue);
+      expect(
+        voice.spoken.where((line) => line == TutorScripts.orientation.first),
+        hasLength(1),
+      );
+      expect(engine.stage1Shruti, Pitch.g);
+      expect(engine.isSessionActive, isTrue);
+    },
+  );
+
+  test('stop during orientation does not start the session', () async {
+    late final AssistModeController engine;
+    late final TutorSession tutor;
+    engine = buildEngine(wait: (_) async {});
+    addTearDown(engine.dispose);
+
+    voice.onSpeak = (text) async {
+      if (text == TutorScripts.orientation.first) {
+        await tutor.stop();
+      }
+    };
+    tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await tutor.begin();
+
+    expect(tutor.step, TutorStep.stopped);
+    expect(tutor.showJourneyProgress, isFalse);
+    expect(tutor.journeyStage, isNull);
+    expect(tutor.headline, TutorScripts.sessionStopped);
+    expect(tutor.showStop, isFalse);
+    expect(engine.isSessionActive, isFalse);
+    expect(engine.uiPhase, AssistUiPhase.intro);
+    expect(detectionService.isListening, isFalse);
+    expect(engine.isPitchAnalysisEnabled, isFalse);
+    expect(referenceSound.playCount, 0);
+    expect(referenceSound.isPlaying, isFalse);
+    expect(voice.spoken, contains(TutorScripts.orientation.first));
+    expect(voice.spoken, isNot(contains(TutorScripts.discoverIntro.first)));
+    expect(voice.spoken, isNot(contains(TutorScripts.countdown.first)));
+    final spoken = voice.spoken.length;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(voice.spoken.length, spoken);
+    expect(engine.uiPhase, AssistUiPhase.intro);
+  });
+
+  test(
+    'journey stage follows the existing search without changing it',
+    () async {
+      late final AssistModeController engine;
+      late final TutorSession tutor;
+      TutorJourneyStage? duringStage1;
+      TutorJourneyStage? duringStage2;
+
+      engine = buildEngine(
+        wait: phasedWait(
+          () => engine,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening && !engine.isExploringRange) {
+              duringStage1 = tutor.journeyStage;
+              await emitPitch(detectionService, Pitch.g);
+              return;
+            }
+            if (phase == AssistUiPhase.listening &&
+                engine.isExploringRange &&
+                engine.currentRangePoint == AssistRangePoint.lowerSa &&
+                duringStage2 == null) {
+              duringStage2 = tutor.journeyStage;
+            }
+          },
+        ),
+      );
+      addTearDown(engine.dispose);
+      tutor = buildTutor(engine);
+      addTearDown(tutor.dispose);
+
+      await tutor.begin();
+
+      var markedFirstComfortable = false;
+      for (var i = 0; i < 64; i++) {
+        if (engine.uiPhase == AssistUiPhase.awaitingLowerAudibility) {
+          expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+          await tutor.answerLowerAudibility(true);
+        } else if (engine.uiPhase == AssistUiPhase.awaitingUpperComfort) {
+          if (!markedFirstComfortable) {
+            markedFirstComfortable = true;
+            await tutor.answerUpperComfort(true);
+          } else {
+            await tutor.answerUpperComfort(false);
+          }
+        } else if (engine.uiPhase == AssistUiPhase.completed) {
+          break;
+        } else {
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+
+      for (var i = 0; i < 50; i++) {
+        if (engine.uiPhase == AssistUiPhase.completed && !engine.isBusy) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+
+      expect(duringStage1, TutorJourneyStage.listenToVoice);
+      expect(duringStage2, TutorJourneyStage.exploreRange);
+      expect(engine.stage1Shruti, Pitch.g);
+      expect(engine.lastComfortableShruti, Pitch.g);
+      expect(engine.referencePitch, Pitch.g);
+      expect(engine.uiPhase, AssistUiPhase.completed);
+      expect(tutor.step, TutorStep.complete);
+      expect(tutor.journeyStage, TutorJourneyStage.findShruti);
+      expect(
+        tutor.journeyMark(TutorJourneyStage.listenToVoice),
+        TutorJourneyMark.complete,
+      );
+      expect(
+        tutor.journeyMark(TutorJourneyStage.exploreRange),
+        TutorJourneyMark.complete,
+      );
+      expect(
+        tutor.journeyMark(TutorJourneyStage.findShruti),
+        TutorJourneyMark.current,
+      );
+    },
+  );
+
+  Future<void> pumpUntil(bool Function() ready, {int turns = 30}) async {
+    for (var i = 0; i < turns; i++) {
+      if (ready()) {
+        return;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  test('first Stage 2 miss uses the existing retry line', () async {
+    late final AssistModeController engine;
+    var lowerSolos = 0;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        lowerSolos += 1;
+        if (lowerSolos == 1) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(voice.spoken, contains(TutorScripts.rangeRetryOnce));
+    expect(voice.spoken, isNot(contains(TutorScripts.practiceTogether)));
+    expect(voice.spoken, isNot(contains(TutorScripts.makeThisEasier)));
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+  });
+
+  test('repeated Stage 2 misses offer a different sound', () async {
+    late final AssistModeController engine;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          expect(engine.isPitchAnalysisEnabled, isFalse);
+          expect(engine.didMatchCurrentRangeTarget, isFalse);
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await tutor.begin();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+
+    expect(voice.spoken, contains(TutorScripts.rangeRetryOnce));
+    expect(voice.spoken, contains(TutorScripts.practiceTogether));
+    expect(voice.spoken, contains(TutorScripts.singAlongWithMe));
+    expect(voice.spoken, contains(TutorScripts.tryOnYourOwn));
+    expect(voice.spoken, contains(TutorScripts.makeThisEasier));
+    expect(voice.spoken, contains(TutorScripts.offerDifferentSound));
+    expect(
+      voice.spoken.indexOf(TutorScripts.makeThisEasier),
+      greaterThan(voice.spoken.indexOf(TutorScripts.tryOnYourOwn)),
+    );
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.last)));
+    expect(engine.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(tutor.step, TutorStep.offerDifferentSound);
+    expect(tutor.showDifferentSoundChoice, isTrue);
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+    expect(tutor.headline, TutorScripts.offerDifferentSound);
+    expect(tutor.supportText, 'Say yes or no — or tap below.');
+    expect(tutor.canAnswerDifferentSound, isTrue);
+  });
+
+  test('yes tries the nearby sound and keeps exploring', () async {
+    late final AssistModeController engine;
+    var matchNearby = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          expect(engine.isPitchAnalysisEnabled, isFalse);
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchNearby) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+
+    matchNearby = true;
+    await tutor.answerDifferentSound(true);
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(voice.spoken, contains(TutorScripts.tryThisSound));
+    expect(engine.currentExploreCandidate, Pitch.cSharp);
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+    final lovelyAt = voice.spoken.indexOf(TutorScripts.tryThisSound);
+    expect(
+      voice.spoken.skip(lovelyAt + 1),
+      isNot(contains(TutorScripts.lowerSoundIntro)),
+    );
+  });
+
+  test('no stays with this sound and practices together again', () async {
+    late final AssistModeController engine;
+    var matchAfterDecline = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          expect(engine.isPitchAnalysisEnabled, isFalse);
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchAfterDecline) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+
+    matchAfterDecline = true;
+    await tutor.answerDifferentSound(false);
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(voice.spoken, contains(TutorScripts.stayWithThisSound));
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.practiceTogether),
+      hasLength(2),
+    );
+    expect(engine.currentExploreCandidate, Pitch.c);
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+  });
+
+  test(
+    'another struggle after a new sound returns to Stage 1 without welcome',
+    () async {
+      late final AssistModeController engine;
+      TutorJourneyStage? journeyDuringStepBack;
+      var resumed = false;
+      engine = buildEngine(
+        wait: (duration) async {
+          if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+            return;
+          }
+          if (engine.uiPhase != AssistUiPhase.listening) {
+            return;
+          }
+          if (!engine.isExploringRange) {
+            await emitPitch(detectionService, Pitch.c);
+            return;
+          }
+          if (!resumed) {
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+            return;
+          }
+          final hz = engine.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(engine.dispose);
+      late final TutorSession tutor;
+      voice.onSpeak = (text) async {
+        if (text != TutorScripts.stepBackToVoice) {
+          return;
+        }
+        journeyDuringStepBack = tutor.journeyStage;
+        resumed = true;
+        expect(engine.stage, AssistStage.findingStart);
+        expect(engine.uiPhase, AssistUiPhase.refreshingStartingNote);
+      };
+      tutor = buildTutor(engine);
+      addTearDown(tutor.dispose);
+
+      await tutor.begin();
+      await pumpUntil(
+        () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      );
+      expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+
+      await tutor.answerDifferentSound(true);
+      await pumpUntil(
+        () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+        turns: 80,
+      );
+
+      expect(journeyDuringStepBack, TutorJourneyStage.listenToVoice);
+      expect(voice.spoken, contains(TutorScripts.stepBackToVoice));
+      expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+      expect(
+        voice.spoken.where((line) => line == TutorScripts.welcome.first),
+        hasLength(1),
+      );
+      expect(
+        voice.spoken.where((line) => line == TutorScripts.orientation.first),
+        hasLength(1),
+      );
+      expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+      expect(voice.spoken, isNot(contains(TutorScripts.unresolved.last)));
+      expect(engine.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+      expect(engine.isSessionActive, isTrue);
+    },
+  );
+
+  test('stop during easier-sound recovery cancels immediately', () async {
+    late final AssistModeController engine;
+    late final TutorSession tutor;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(engine.dispose);
+    tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+
+    await tutor.stop();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(tutor.step, TutorStep.stopped);
+    expect(engine.uiPhase, AssistUiPhase.intro);
+    expect(engine.isSessionActive, isFalse);
+    expect(detectionService.isListening, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+  });
+
+  test('spoken yes tries the nearby sound', () async {
+    late final AssistModeController engine;
+    var matchNearby = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchNearby) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+
+    matchNearby = true;
+    await tutor.submitSpokenAnswer('yes');
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(voice.spoken, contains(TutorScripts.tryThisSound));
+    expect(engine.currentExploreCandidate, Pitch.cSharp);
+    expect(tutor.canAnswerDifferentSound, isFalse);
+  });
+
+  test('spoken no stays with this sound', () async {
+    late final AssistModeController engine;
+    var matchAfterDecline = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchAfterDecline) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+    );
+
+    matchAfterDecline = true;
+    await tutor.submitSpokenAnswer('no');
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(voice.spoken, contains(TutorScripts.stayWithThisSound));
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.practiceTogether),
+      hasLength(2),
+    );
+    expect(engine.currentExploreCandidate, Pitch.c);
+  });
+
+  test('a second different-sound answer does not move twice', () async {
+    late final AssistModeController engine;
+    var matchNearby = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchNearby) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(() => tutor.canAnswerDifferentSound);
+
+    matchNearby = true;
+    final first = tutor.answerDifferentSound(true);
+    final second = tutor.answerDifferentSound(true);
+    await Future.wait<void>([first, second]);
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(engine.currentExploreCandidate, Pitch.cSharp);
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.tryThisSound),
+      hasLength(1),
+    );
+  });
+
+  test('a failed reply clip still tries the nearby sound', () async {
+    late final AssistModeController engine;
+    var matchNearby = false;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging) {
+          return;
+        }
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        if (!matchNearby) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(engine.dispose);
+    voice.onSpeak = (text) async {
+      if (text == TutorScripts.tryThisSound) {
+        throw StateError('missing clip');
+      }
+    };
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(() => tutor.canAnswerDifferentSound);
+
+    matchNearby = true;
+    await tutor.answerDifferentSound(true);
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(engine.currentExploreCandidate, Pitch.cSharp);
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+  });
+
+  test('stop during the different-sound reply does not continue', () async {
+    late final AssistModeController engine;
+    late final TutorSession tutor;
+    engine = buildEngine(
+      wait: (duration) async {
+        if (engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(engine.dispose);
+    voice.onSpeak = (text) async {
+      if (text == TutorScripts.tryThisSound) {
+        await tutor.stop();
+      }
+    };
+    tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(() => tutor.canAnswerDifferentSound);
+
+    await tutor.answerDifferentSound(true);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    await tutor.answerDifferentSound(true);
+
+    expect(tutor.step, TutorStep.stopped);
+    expect(engine.uiPhase, AssistUiPhase.intro);
+    expect(engine.isSessionActive, isFalse);
+    expect(engine.currentExploreCandidate, isNot(Pitch.cSharp));
+    expect(detectionService.isListening, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+  });
+
+  test('a successful Stage 2 start does not enter recovery', () async {
+    late final AssistModeController engine;
+    engine = buildEngine(
+      wait: phasedWait(
+        () => engine,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening && !engine.isExploringRange) {
+            await emitPitch(detectionService, Pitch.g);
+          }
+        },
+      ),
+    );
+    addTearDown(engine.dispose);
+    final tutor = buildTutor(engine);
+    addTearDown(tutor.dispose);
+
+    await engine.startSession();
+    await pumpUntil(
+      () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
+    );
+
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(engine.currentExploreCandidate, Pitch.g);
+    expect(voice.spoken, contains(TutorScripts.lowerSoundIntro));
+    expect(voice.spoken, isNot(contains(TutorScripts.rangeRetryOnce)));
+    expect(voice.spoken, isNot(contains(TutorScripts.practiceTogether)));
+    expect(voice.spoken, isNot(contains(TutorScripts.makeThisEasier)));
+    expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
+    expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+  });
 }

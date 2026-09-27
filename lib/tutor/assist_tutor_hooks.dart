@@ -46,10 +46,9 @@ class AssistTutorHooks {
   /// Called once the countdown has finished and the reference is about to play.
   final Future<void> Function()? onAssistedReferenceWillStart;
 
-  /// After a confirmed user match: reference has stopped and settled.
+  /// After assisted reference playback has stopped and settled.
   ///
-  /// Not called when the capture path cannot separate the singer from the
-  /// speaker. Ending the practice window is not confirmation.
+  /// Speaks the solo handoff only. The practice window is not a match result.
   final Future<void> Function()? afterAssistedSinging;
 
   /// Practice ended with no confirmed user match. Do not claim the user is ready.

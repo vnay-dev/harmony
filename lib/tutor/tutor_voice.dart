@@ -1,8 +1,12 @@
-/// Speaks tutor lines aloud. Implementations may use platform TTS.
+/// Speaks tutor lines aloud.
 ///
-/// Tests inject a recording fake so speech sequence is deterministic.
+/// The app plays bundled recordings. Tests inject a recording fake so speech
+/// sequence is deterministic.
 abstract class TutorVoice {
-  /// Speaks [text] and completes when utterance finishes (or is cancelled).
+  /// Speaks [text] and completes when playback finishes or is cancelled.
+  ///
+  /// [text] is the script line the session already uses. A recording-backed
+  /// implementation may also accept an asset id such as `S01`.
   Future<void> speak(String text);
 
   /// Stops any in-progress utterance.

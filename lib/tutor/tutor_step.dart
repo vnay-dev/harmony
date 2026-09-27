@@ -4,6 +4,9 @@
 /// voice/UI-facing narrative layer.
 enum TutorStep {
   welcome,
+
+  /// Spoken once after welcome, before the starting-note exercise.
+  orientation,
   discoverStartingNote,
   startingNoteCaptured,
   startingNoteFailure,
@@ -13,6 +16,9 @@ enum TutorStep {
   testUpper,
   askUpperComfort,
   exploreNextShruti,
+
+  /// Stage 2 recovery: offer a nearby sound after assisted practice.
+  offerDifferentSound,
   complete,
   unresolved,
   stopped,
@@ -32,3 +38,12 @@ enum TutorTeachingLevel {
   /// Third struggle — simplify to humming along.
   humAlong,
 }
+
+/// User-facing place in Tutor Mode.
+///
+/// Derived from the existing tutor step and Assist engine. It does not
+/// decide pitches or advance the search.
+enum TutorJourneyStage { listenToVoice, exploreRange, findShruti }
+
+/// How one [TutorJourneyStage] is drawn in the journey indicator.
+enum TutorJourneyMark { complete, current, upcoming }
