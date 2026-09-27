@@ -12,6 +12,7 @@ import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/app_theme.dart';
+import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_session.dart';
 import 'package:harmony/tutor/tutor_speech_recognizer.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
@@ -959,6 +960,77 @@ void main() {
     return controller;
   }
 
+  Future<TutorSession> openDifferentSoundChoice({
+    required WidgetTester tester,
+    required AssistModeController engine,
+    required FakeTutorVoice voice,
+  }) async {
+    final tutor = TutorSession(
+      engine: engine,
+      voice: voice,
+      speechRecognizer: SilentTutorSpeechRecognizer(),
+      timing: const TutorTimingConfig.instant(),
+      wait: (_) async {},
+    );
+    await tester.runAsync(() async {
+      await tutor.begin();
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (!tutor.canAnswerDifferentSound &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: engine,
+          tutorSession: tutor,
+          autoBegin: false,
+        ),
+      ),
+    );
+    await tester.pump();
+    return tutor;
+  }
+
+  AssistModeController engineThatMissesUntilChoice({
+    required FakePitchDetectionService detection,
+    required FakeAudioService audio,
+    required bool Function() matchNearby,
+  }) {
+    late final AssistModeController engine;
+    engine = AssistModeController(
+      detectionService: detection,
+      audioService: audio,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (_) async {
+        if (engine.uiPhase == AssistUiPhase.assistedSinging ||
+            engine.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!engine.isExploringRange) {
+          emitStable(detection, Pitch.c);
+          return;
+        }
+        if (!matchNearby()) {
+          emitStableHz(detection, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = engine.currentRangeTargetHz;
+        if (hz != null) {
+          emitStableHz(detection, hz);
+        }
+      },
+    );
+    return engine;
+  }
+
   void expectNoRenderOverflow(WidgetTester tester) {
     expect(tester.takeException(), isNull);
     // RenderFlex overflow paints a yellow/black stripe Text; ensure absent.
@@ -1211,5 +1283,350 @@ void main() {
       find.byKey(const ValueKey<String>('tutor-exercise-dots')),
       findsNothing,
     );
+  });
+
+  void expectJourneyMarks({
+    required String listen,
+    required String explore,
+    required String findShruti,
+  }) {
+    expect(find.byKey(const ValueKey<String>('tutor-journey')), findsOneWidget);
+    expect(find.text('Finding your Shruti'), findsOneWidget);
+    expect(find.text('Listen to your voice'), findsOneWidget);
+    expect(find.text('Explore your range'), findsOneWidget);
+    expect(find.text('Find your Shruti'), findsNWidgets(2));
+    expect(
+      find.byKey(ValueKey<String>('tutor-journey-listenToVoice-$listen')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(ValueKey<String>('tutor-journey-exploreRange-$explore')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(ValueKey<String>('tutor-journey-findShruti-$findShruti')),
+      findsOneWidget,
+    );
+  }
+
+  testWidgets('Stage 1 shows listen as the current journey stage', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final holdListenPhase = Completer<void>();
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: FakePitchDetectionService(),
+      audioService: FakeAudioService(),
+      candidateFinder: buildFinder(),
+      referenceSoundGenerator: FakeReferenceSoundGenerator(),
+      timing: const AssistTimingConfig(
+        referencePlayDuration: Duration(seconds: 30),
+        settlingDuration: Duration(seconds: 30),
+        listenDuration: Duration(seconds: 30),
+        transitionDuration: Duration(seconds: 30),
+        countdownStepDuration: Duration.zero,
+      ),
+      prepareAudioSession: () async {},
+      wait: (_) => holdListenPhase.future,
+    );
+    addTearDown(controller.dispose);
+
+    final tutor = TutorSession(
+      engine: controller,
+      voice: FakeTutorVoice(),
+      speechRecognizer: SilentTutorSpeechRecognizer(),
+      timing: const TutorTimingConfig.instant(),
+      wait: (_) async {},
+    );
+    addTearDown(tutor.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorSession: tutor,
+          autoBegin: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('tutor-journey')), findsNothing);
+
+    unawaited(controller.startSession());
+    await tester.pump();
+    await tester.pump();
+
+    expect(controller.uiPhase, AssistUiPhase.listening);
+    expect(controller.isExploringRange, isFalse);
+    expectJourneyMarks(
+      listen: 'current',
+      explore: 'upcoming',
+      findShruti: 'upcoming',
+    );
+
+    holdListenPhase.complete();
+    await tester.pump();
+  });
+
+  testWidgets('Stage 2 shows range exploration as the current journey stage', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    await tester.runAsync(() async {
+      controller = await buildSessionAtPhase(
+        detection: detection,
+        audio: audio,
+        targetPhase: AssistUiPhase.awaitingLowerAudibility,
+      );
+    });
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.isExploringRange, isTrue);
+    expectJourneyMarks(
+      listen: 'complete',
+      explore: 'current',
+      findShruti: 'upcoming',
+    );
+    expectNoRenderOverflow(tester);
+  });
+
+  testWidgets('Stage 3 shows finding the Shruti as the current journey stage', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    await tester.runAsync(() async {
+      controller = await buildCompletedSession(
+        detection: detection,
+        audio: audio,
+      );
+    });
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expectJourneyMarks(
+      listen: 'complete',
+      explore: 'complete',
+      findShruti: 'current',
+    );
+    expect(find.text('We found it'), findsOneWidget);
+  });
+
+  testWidgets('different-sound question shows enabled Yes, No, and Stop', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    final voice = FakeTutorVoice();
+    var matchNearby = false;
+    final engine = engineThatMissesUntilChoice(
+      detection: detection,
+      audio: audio,
+      matchNearby: () => matchNearby,
+    );
+    addTearDown(engine.dispose);
+    final tutor = await openDifferentSoundChoice(
+      tester: tester,
+      engine: engine,
+      voice: voice,
+    );
+    addTearDown(tutor.dispose);
+
+    expectNoRenderOverflow(tester);
+    expect(find.text(TutorScripts.offerDifferentSound), findsOneWidget);
+    expect(find.text('Say yes or no — or tap below.'), findsOneWidget);
+    expect(find.text('Yes'), findsOneWidget);
+    expect(find.text('No'), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey<String>('assist-different-sound-yes')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.byKey(const ValueKey<String>('assist-different-sound-no')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.byKey(const ValueKey<String>('assist-stop')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+
+    matchNearby = true;
+    await tester.tap(
+      find.byKey(const ValueKey<String>('assist-different-sound-yes')),
+    );
+    await tester.pump();
+    await tester.runAsync(() async {
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (engine.uiPhase != AssistUiPhase.awaitingLowerAudibility &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pump();
+
+    expect(engine.currentExploreCandidate, Pitch.cSharp);
+    expect(engine.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.tryThisSound),
+      hasLength(1),
+    );
+  });
+
+  testWidgets('No stays with the current sound for another practice', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    final voice = FakeTutorVoice();
+    var matchAfterDecline = false;
+    final engine = engineThatMissesUntilChoice(
+      detection: detection,
+      audio: audio,
+      matchNearby: () => matchAfterDecline,
+    );
+    addTearDown(engine.dispose);
+    final tutor = await openDifferentSoundChoice(
+      tester: tester,
+      engine: engine,
+      voice: voice,
+    );
+    addTearDown(tutor.dispose);
+
+    matchAfterDecline = true;
+    await tester.tap(
+      find.byKey(const ValueKey<String>('assist-different-sound-no')),
+    );
+    await tester.pump();
+    await tester.runAsync(() async {
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (engine.uiPhase != AssistUiPhase.awaitingLowerAudibility &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pump();
+
+    expect(engine.currentExploreCandidate, Pitch.c);
+    expect(
+      voice.spoken.where((line) => line == TutorScripts.practiceTogether),
+      hasLength(2),
+    );
+    expect(voice.spoken, contains(TutorScripts.stayWithThisSound));
+  });
+
+  testWidgets('Stop leaves the different-sound question and stays stopped', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    final voice = FakeTutorVoice();
+    final engine = engineThatMissesUntilChoice(
+      detection: detection,
+      audio: audio,
+      matchNearby: () => false,
+    );
+    addTearDown(engine.dispose);
+    final tutor = await openDifferentSoundChoice(
+      tester: tester,
+      engine: engine,
+      voice: voice,
+    );
+    addTearDown(tutor.dispose);
+
+    await tester.tap(find.byKey(const ValueKey<String>('assist-stop')));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+
+    expect(find.text('Session stopped'), findsOneWidget);
+    expect(find.text('Yes'), findsNothing);
+    expect(find.byKey(const ValueKey<String>('assist-stop')), findsNothing);
+    expect(engine.uiPhase, AssistUiPhase.intro);
+    expect(engine.isSessionActive, isFalse);
+    expect(tutor.canAnswerDifferentSound, isFalse);
+
+    await tester.runAsync(() => tutor.answerDifferentSound(true));
+    await tester.pump();
+
+    expect(engine.uiPhase, AssistUiPhase.intro);
+    expect(engine.isSessionActive, isFalse);
+    expect(find.text('Session stopped'), findsOneWidget);
   });
 }

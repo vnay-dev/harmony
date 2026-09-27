@@ -158,6 +158,7 @@ void main() {
     test('does not claim sing with me or sing along', () {
       final lines = <String>[
         ...TutorScripts.welcome,
+        ...TutorScripts.orientation,
         ...TutorScripts.discoverIntro,
         ...TutorScripts.countdown,
         TutorScripts.listenComplete,

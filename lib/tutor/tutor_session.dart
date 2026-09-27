@@ -70,6 +70,7 @@ class TutorSession extends ChangeNotifier {
   bool _stopRequested = false;
   int _unclearAnswerCount = 0;
   bool _questionOpen = false;
+  bool _differentSoundChoiceReady = false;
 
   /// Bumped on Stop and on each fresh start so late callbacks cannot continue.
   int _sessionToken = 0;
@@ -98,6 +99,7 @@ class TutorSession extends ChangeNotifier {
   double get progress {
     switch (_step) {
       case TutorStep.welcome:
+      case TutorStep.orientation:
         return 0.05;
       case TutorStep.discoverStartingNote:
       case TutorStep.startingNoteFailure:
@@ -113,6 +115,7 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.askUpperComfort:
         return 0.75;
       case TutorStep.exploreNextShruti:
+      case TutorStep.offerDifferentSound:
         return 0.85;
       case TutorStep.complete:
         return 1;
@@ -126,13 +129,65 @@ class TutorSession extends ChangeNotifier {
   bool _isLive(int token) =>
       !_isDisposed && !_stopRequested && token == _sessionToken;
 
+  /// Quiet heading above the journey indicator.
+  static const journeyHeading = 'Finding your Shruti';
+
+  /// True after orientation begins, until the session is stopped.
+  bool get showJourneyProgress => journeyStage != null;
+
+  /// Visible journey place. Null during welcome and after Stop.
+  TutorJourneyStage? get journeyStage {
+    if (_step == TutorStep.welcome || _step == TutorStep.stopped) {
+      return null;
+    }
+
+    final phase = _engine.uiPhase;
+    if (_step == TutorStep.complete ||
+        _step == TutorStep.unresolved ||
+        phase == AssistUiPhase.completed ||
+        phase == AssistUiPhase.rangeBoundaryReached ||
+        phase == AssistUiPhase.rangeUnresolved) {
+      return TutorJourneyStage.findShruti;
+    }
+    if (_engine.isExploringRange) {
+      return TutorJourneyStage.exploreRange;
+    }
+    return TutorJourneyStage.listenToVoice;
+  }
+
+  static String journeyLabel(TutorJourneyStage stage) {
+    switch (stage) {
+      case TutorJourneyStage.listenToVoice:
+        return 'Listen to your voice';
+      case TutorJourneyStage.exploreRange:
+        return 'Explore your range';
+      case TutorJourneyStage.findShruti:
+        return 'Find your Shruti';
+    }
+  }
+
+  TutorJourneyMark journeyMark(TutorJourneyStage stage) {
+    final current = journeyStage;
+    if (current == null || stage.index > current.index) {
+      return TutorJourneyMark.upcoming;
+    }
+    if (stage == current) {
+      return TutorJourneyMark.current;
+    }
+    return TutorJourneyMark.complete;
+  }
+
   /// Primary on-screen action cue. During countdown, only the countdown
   /// display shows the digit — headline stays a calm label.
   String get headline {
     switch (_step) {
       case TutorStep.welcome:
+      case TutorStep.orientation:
         return 'Find your comfortable Shruti';
       case TutorStep.discoverStartingNote:
+        if (_engine.uiPhase == AssistUiPhase.refreshingStartingNote) {
+          return TutorScripts.stepBackToVoice;
+        }
         if (_engine.uiPhase == AssistUiPhase.countdown) {
           return 'Your turn';
         }
@@ -152,6 +207,8 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.testUpper:
       case TutorStep.exploreNextShruti:
         return _rangeActionHeadline();
+      case TutorStep.offerDifferentSound:
+        return TutorScripts.offerDifferentSound;
       case TutorStep.askLowerAudibility:
         return 'Could you hear that sound clearly?';
       case TutorStep.askUpperComfort:
@@ -168,6 +225,7 @@ class TutorSession extends ChangeNotifier {
   String? get supportText {
     switch (_step) {
       case TutorStep.welcome:
+      case TutorStep.orientation:
         return "I'll guide you. You just sing.";
       case TutorStep.discoverStartingNote:
         if (_engine.uiPhase == AssistUiPhase.listening) {
@@ -191,6 +249,8 @@ class TutorSession extends ChangeNotifier {
         return 'Whenever you are ready.';
       case TutorStep.stopped:
         return TutorScripts.sessionStoppedSupport;
+      case TutorStep.offerDifferentSound:
+        return 'Say yes or no — or tap below.';
       case TutorStep.startingNoteFailure:
       case TutorStep.testLower:
       case TutorStep.testMiddle:
@@ -208,6 +268,18 @@ class TutorSession extends ChangeNotifier {
       _engine.uiPhase == AssistUiPhase.listening && !_engine.isExploringRange;
 
   bool get showYesNoFallback => _step == TutorStep.askLowerAudibility;
+
+  /// Yes / No for trying a nearby sound. Separate from Lower Sa audibility.
+  bool get showDifferentSoundChoice =>
+      _step == TutorStep.offerDifferentSound &&
+      _engine.uiPhase == AssistUiPhase.offeringEasierSound;
+
+  /// True once the recovery question has been offered and can still be answered.
+  ///
+  /// Stays false while S59/S60 are speaking, and while a tap is already in
+  /// progress, so the choice cannot fire twice or wait on a dead audio future.
+  bool get canAnswerDifferentSound =>
+      _differentSoundChoiceReady && _questionOpen && showDifferentSoundChoice;
 
   bool get showComfortFallback => _step == TutorStep.askUpperComfort;
 
@@ -252,7 +324,17 @@ class TutorSession extends ChangeNotifier {
     if (!_isLive(token)) {
       return;
     }
+    _setStep(TutorStep.orientation);
+    notifyListeners();
+    await _voice.speakAll(
+      TutorScripts.orientation,
+      eventIdPrefix: 'orientation',
+    );
+    if (!_isLive(token)) {
+      return;
+    }
     _setStep(TutorStep.discoverStartingNote);
+    notifyListeners();
     await _voice.speakAll(
       TutorScripts.discoverIntro,
       eventIdPrefix: 'discover',
@@ -270,6 +352,8 @@ class TutorSession extends ChangeNotifier {
     _sessionToken += 1;
     _stopRequested = true;
     _listeningForSpeechAnswer = false;
+    _differentSoundChoiceReady = false;
+    _questionOpen = false;
     _setStep(TutorStep.stopped);
     _engine.cancelActiveWork();
     _voice.cancelSpeech();
@@ -321,6 +405,8 @@ class TutorSession extends ChangeNotifier {
     _unclearAnswerCount = 0;
     _countdownEmitted.clear();
     _listeningForSpeechAnswer = false;
+    _differentSoundChoiceReady = false;
+    _questionOpen = false;
     _voice.cancelSpeech();
     _voice.resetEventKeys();
     _setStep(TutorStep.welcome);
@@ -370,7 +456,59 @@ class TutorSession extends ChangeNotifier {
     }
   }
 
+  Future<void> answerDifferentSound(bool tryDifferentSound) async {
+    if (_engine.uiPhase != AssistUiPhase.offeringEasierSound ||
+        _engine.isBusy ||
+        !_claimQuestion()) {
+      return;
+    }
+    final token = _sessionToken;
+    _differentSoundChoiceReady = false;
+    _listeningForSpeechAnswer = false;
+    notifyListeners();
+    unawaited(_speech.stop());
+    await _speakRecoveryLine(
+      tryDifferentSound
+          ? 'different-sound-yes-${_engine.currentRound}-'
+                '${_engine.currentExploreCandidate?.label}'
+          : 'different-sound-no-${_engine.currentRound}-'
+                '${_engine.currentExploreCandidate?.label}',
+      tryDifferentSound
+          ? TutorScripts.tryThisSound
+          : TutorScripts.stayWithThisSound,
+    );
+    if (!_isLive(token) ||
+        _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
+      return;
+    }
+    if (tryDifferentSound) {
+      await _engine.acceptDifferentSound();
+    } else {
+      await _engine.declineDifferentSound();
+    }
+  }
+
+  /// Speaks a recovery line. A missing or failed clip must not trap the choice.
+  Future<void> _speakRecoveryLine(String eventId, String line) async {
+    try {
+      await _voice.speakOnce(eventId, line);
+    } catch (_) {}
+  }
+
   Future<void> submitSpokenAnswer(String raw) async {
+    if (_step == TutorStep.offerDifferentSound) {
+      final answer = _answerParser.parseYesNo(raw);
+      switch (answer) {
+        case TutorYesNoAnswer.yes:
+          await answerDifferentSound(true);
+        case TutorYesNoAnswer.no:
+          await answerDifferentSound(false);
+        case TutorYesNoAnswer.unclear:
+          await _handleUnclearDifferentSound();
+      }
+      return;
+    }
+
     if (_step == TutorStep.askLowerAudibility) {
       final answer = _answerParser.parseYesNo(raw);
       switch (answer) {
@@ -422,6 +560,21 @@ class TutorSession extends ChangeNotifier {
     }
 
     _syncStepFromEngine();
+    if (_engine.suppressNextRangeIntro) {
+      _engine.consumeRangeIntroSuppression();
+      await _voice.speakOnce(
+        'ref-recovery-listen-${_engine.currentRound}-'
+        '${_engine.currentExploreCandidate?.label}',
+        TutorScripts.listenFirst,
+        pauseAfter: _timing.speechToReferencePause,
+      );
+      if (!_isLive(token)) {
+        return;
+      }
+      await _voice.beginReferenceAudio();
+      notifyListeners();
+      return;
+    }
     final point = _engine.currentRangePoint;
     final failure = _engine.rangePointFailureCount;
     final eventBase =
@@ -571,14 +724,6 @@ class TutorSession extends ChangeNotifier {
       return;
     }
     await _voice.speakOnce(
-      'assist-ready-${_engine.currentRound}-${_engine.currentRangePoint?.name}',
-      TutorScripts.assistedReady,
-      pauseAfter: _timing.sentencePause,
-    );
-    if (!_isLive(token)) {
-      return;
-    }
-    await _voice.speakOnce(
       'assist-own-${_engine.currentRound}-${_engine.currentRangePoint?.name}',
       TutorScripts.tryOnYourOwn,
       pauseAfter: _timing.shortTransitionPause,
@@ -590,10 +735,6 @@ class TutorSession extends ChangeNotifier {
     final token = _sessionToken;
     _voice.endReferenceAudio();
     if (!_isLive(token)) {
-      return;
-    }
-    if (_engine.assistedAttemptCount >=
-        AssistModeController.maxAssistedAttemptsPerPoint) {
       return;
     }
     await _voice.speakOnce(
@@ -691,7 +832,9 @@ class TutorSession extends ChangeNotifier {
     }
 
     // Speak reactive lines only once per phase entry.
-    if (phase == _lastHandledPhase && phase != AssistUiPhase.retry) {
+    if (phase == _lastHandledPhase &&
+        phase != AssistUiPhase.retry &&
+        phase != AssistUiPhase.refreshingStartingNote) {
       _syncStepFromEngine();
       return;
     }
@@ -733,6 +876,46 @@ class TutorSession extends ChangeNotifier {
         unawaited(_listenForComfortAnswer());
       case AssistUiPhase.exploringNextShruti:
         _setStep(TutorStep.exploreNextShruti);
+      case AssistUiPhase.offeringEasierSound:
+        _questionOpen = true;
+        _unclearAnswerCount = 0;
+        _differentSoundChoiceReady = false;
+        _setStep(TutorStep.offerDifferentSound);
+        notifyListeners();
+        await _speakRecoveryLine(
+          'easier-${_engine.currentRound}-'
+          '${_engine.currentExploreCandidate?.label}-'
+          '${_engine.currentRangePoint?.name}',
+          TutorScripts.makeThisEasier,
+        );
+        if (!_isLive(token)) {
+          return;
+        }
+        await _speakRecoveryLine(
+          'offer-sound-${_engine.currentRound}-'
+          '${_engine.currentExploreCandidate?.label}-'
+          '${_engine.currentRangePoint?.name}',
+          TutorScripts.offerDifferentSound,
+        );
+        if (!_isLive(token)) {
+          return;
+        }
+        _differentSoundChoiceReady = true;
+        notifyListeners();
+        unawaited(_listenForDifferentSoundAnswer());
+      case AssistUiPhase.refreshingStartingNote:
+        _questionOpen = false;
+        _stage1AutoRetryCount = 0;
+        _lastHandledStage1FailureCount = 0;
+        _setStep(TutorStep.discoverStartingNote);
+        await _voice.speakOnce(
+          'step-back-${_engine.currentRound}',
+          TutorScripts.stepBackToVoice,
+        );
+        if (!_isLive(token)) {
+          return;
+        }
+        await _engine.continueStartingNoteDiscovery();
       case AssistUiPhase.rangeBoundaryReached:
         await _engine.acknowledgeRangeBoundary();
       case AssistUiPhase.rangeUnresolved:
@@ -873,6 +1056,57 @@ class TutorSession extends ChangeNotifier {
     }
   }
 
+  Future<void> _listenForDifferentSoundAnswer() async {
+    final token = _sessionToken;
+    if (!_isLive(token) || _step != TutorStep.offerDifferentSound) {
+      return;
+    }
+    final available = await _speech.isAvailable;
+    if (!available || _isDisposed) {
+      return;
+    }
+
+    _listeningForSpeechAnswer = true;
+    notifyListeners();
+    try {
+      await _engine.prepareForSpokenAnswer();
+      final transcript = await _speech.listen(
+        timeout: _timing.speechResponseListenDuration,
+        onPartial: (partial) {
+          if (_answerParser.parseYesNo(partial) != TutorYesNoAnswer.unclear) {
+            unawaited(_speech.stop());
+          }
+        },
+      );
+      if (!_isLive(token) ||
+          _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
+        return;
+      }
+      if (transcript == null || transcript.isEmpty) {
+        return;
+      }
+      await submitSpokenAnswer(transcript);
+    } finally {
+      await _engine.restoreAfterSpokenAnswer();
+      _listeningForSpeechAnswer = false;
+      if (!_isDisposed) {
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> _handleUnclearDifferentSound() async {
+    _unclearAnswerCount += 1;
+    await _voice.speakAll(
+      TutorScripts.unclearYesNo,
+      eventIdPrefix: 'unclear-different-$_unclearAnswerCount',
+    );
+    if (_unclearAnswerCount <= 1 &&
+        _engine.uiPhase == AssistUiPhase.offeringEasierSound) {
+      unawaited(_listenForDifferentSoundAnswer());
+    }
+  }
+
   Future<void> _handleUnclearYesNo() async {
     _unclearAnswerCount += 1;
     await _voice.speakAll(
@@ -908,7 +1142,9 @@ class TutorSession extends ChangeNotifier {
       return;
     }
     if (!_engine.isExploringRange) {
-      if (phase == AssistUiPhase.retry) {
+      if (phase == AssistUiPhase.refreshingStartingNote) {
+        _setStep(TutorStep.discoverStartingNote);
+      } else if (phase == AssistUiPhase.retry) {
         _setStep(TutorStep.startingNoteFailure);
       } else if (phase == AssistUiPhase.startingPointFound) {
         _setStep(TutorStep.startingNoteCaptured);
@@ -937,6 +1173,10 @@ class TutorSession extends ChangeNotifier {
         _setStep(TutorStep.askUpperComfort);
       case AssistUiPhase.exploringNextShruti:
         _setStep(TutorStep.exploreNextShruti);
+      case AssistUiPhase.offeringEasierSound:
+        _setStep(TutorStep.offerDifferentSound);
+      case AssistUiPhase.refreshingStartingNote:
+        _setStep(TutorStep.discoverStartingNote);
       case AssistUiPhase.completed:
         _setStep(TutorStep.complete);
       case AssistUiPhase.rangeUnresolved:
