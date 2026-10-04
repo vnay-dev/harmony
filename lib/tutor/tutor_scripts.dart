@@ -1,159 +1,247 @@
+import 'package:harmony/tutor/tutor_dialogue.dart';
+
 /// Spoken (and mirrored UI) lines for the voice-first tutor.
+///
+/// Spoken wording comes from [TutorDialogues] so transcript text and audio ids
+/// stay a single definition. UI-only labels that are never spoken stay here.
 ///
 /// Tone: calm, patient, encouraging — like a meditation guide and music teacher.
 /// Never claim "sing with me" unless Harmony is actually audible while singing.
 class TutorScripts {
   const TutorScripts._();
 
-  static const welcome = <String>[
-    "Hi. I'll help you find a comfortable Shruti.",
-    "You don't need to know anything about singing.",
-    'Just follow my voice.',
+  /// Stage 1 introduction. Spoken once before any listening.
+  static final welcome = <String>[TutorDialogues.s64.text];
+
+  /// Spoken after the user taps "Let's begin".
+  static final firstStepListen = TutorDialogues.s65.text;
+
+  /// Spoken after [firstStepListen], before the ready CTA.
+  static final firstStepInstruction = TutorDialogues.s66.text;
+
+  /// On-screen instruction while Harmony listens in Stage 1.
+  ///
+  /// Displayed as a secondary hint (not spoken dialogue).
+  static const stage1ListenPrompt =
+      'Your turn. Sing one steady sound for a few seconds.';
+
+  /// Spoken once per session after Stage 1 success acknowledgement.
+  ///
+  /// Kept for Stage 2 entry. Not part of the Stage 1 CTA redesign.
+  static final orientation = <String>[
+    TutorDialogues.s54.text,
+    TutorDialogues.s55.text,
+    TutorDialogues.s56.text,
+    TutorDialogues.s57.text,
+    TutorDialogues.s58.text,
   ];
 
-  /// Spoken once per session, after welcome and before [discoverIntro].
-  static const orientation = <String>[
-    "First, I'll listen to your voice.",
-    "Then, we'll explore a few sounds around it.",
-    "You'll tell me how each one feels.",
-    "We'll keep going until we find a comfortable place for your voice.",
-    "There's no right or wrong answer. Just sing naturally and tell me how it feels.",
-  ];
-
-  static const discoverIntro = <String>[
-    "Let's begin gently.",
-    'Sing or hum one comfortable sound.',
-    'Keep that same sound going for a few seconds.',
+  /// Legacy discover intro. Stage 1 now uses [firstStepListen] /
+  /// [firstStepInstruction] instead.
+  static final discoverIntro = <String>[
+    TutorDialogues.s04.text,
+    TutorDialogues.s05.text,
+    TutorDialogues.s06.text,
   ];
 
   /// Spoken countdown before a solo turn. Listening starts after the last step.
-  static const countdown = <String>[
-    "Let's try singing it again in 3...",
-    '2...',
-    '1...',
+  ///
+  /// Stage 1 no longer uses a countdown. Stage 2 still does.
+  /// Use [countdownFirst] when the current range point has not failed yet;
+  /// use [countdown] on later solo retries of the same point.
+  static final countdownFirst = <String>[
+    TutorDialogues.s75.text,
+    TutorDialogues.s08.text,
+    TutorDialogues.s09.text,
+  ];
+
+  /// Solo retry countdown after a prior miss on the same range point.
+  static final countdown = <String>[
+    TutorDialogues.s07.text,
+    TutorDialogues.s08.text,
+    TutorDialogues.s09.text,
   ];
 
   /// Spoken countdown before assisted sing-along. Same 2... / 1... steps.
-  static const assistedCountdown = <String>[
-    "Let's sing together in 3...",
-    '2...',
-    '1...',
+  static final assistedCountdown = <String>[
+    TutorDialogues.s36.text,
+    TutorDialogues.s08.text,
+    TutorDialogues.s09.text,
   ];
+
+  /// True for solo / assisted countdown step lines (including stray "1...").
+  static bool isCountdownLine(String line) {
+    final trimmed = line.trim();
+    return countdownFirst.contains(trimmed) ||
+        countdown.contains(trimmed) ||
+        assistedCountdown.contains(trimmed);
+  }
 
   static const sessionStopped = 'Session stopped';
 
   static const sessionStoppedSupport =
       "You can try again whenever you're ready.";
 
-  /// After a listen window — warm, not commanding.
-  static const listenComplete = 'Beautiful. You can stop there.';
+  /// Stage 1 success acknowledgement.
+  static final stage1Success = TutorDialogues.s67.text;
 
-  /// Next step after the single Stage 1 completion line.
-  static const startingNoteSuccess = <String>[
-    "Now I'll find a comfortable range for you.",
-  ];
+  /// After Stage 1 success, before the user continues.
+  static final readyForNextStep = TutorDialogues.s68.text;
 
-  static const startingNoteRetryOnce = <String>[
-    "That's okay. Let's try once more.",
-    'Sing or hum one steady, comfortable sound.',
+  /// After a Stage 2 listen window — warm, not commanding.
+  static final listenComplete = TutorDialogues.s10.text;
+
+  /// Stage 2 opening after the user taps "I'm ready".
+  static final startingNoteSuccess = <String>[TutorDialogues.s72.text];
+
+  static final startingNoteRetryOnce = <String>[
+    TutorDialogues.s12.text,
+    TutorDialogues.s13.text,
     "I'll let you know when to begin.",
   ];
 
-  static const startingNoteGuided = <String>[
-    "No problem. I'll help you this time.",
-    'Listen first.',
+  /// Stage 1 failure spoken lines (S70 → S61). Mirrored on screen.
+  ///
+  /// After S61 finishes, the same S61 text switches to instruction style and
+  /// the example / shuffle controls appear. S60 / S71 / S62 are not part of
+  /// this sequence.
+  static final startingNoteGuided = <String>[
+    TutorDialogues.s70.text,
+    TutorDialogues.s61.text,
   ];
 
-  /// Honest instruction after a reference — Harmony is silent while the user sings.
-  static const nowTryThatSound = 'Now try that sound.';
+  /// Spoken immediately before a reference sound the singer should hear, not sing.
+  static final listenFirst = TutorDialogues.s15.text;
 
-  static const listenFirst = 'Listen first.';
+  /// Spoken after [lowerSoundIntro], before the first Stage 2 reference.
+  static final lowerSoundListenPrompt = TutorDialogues.s74.text;
 
-  static const lowerSoundIntro = "Let's try a slightly lower sound.";
+  /// On-screen only while a Stage 2 reference tone plays (not spoken).
+  static const referenceListenPrompt = 'Listen to this sound…';
 
-  static const middleSoundIntro = "Nice. Let's try one in the middle.";
+  /// Tertiary Stage 1 action under "Listen to an example" (not spoken).
+  static const shuffleExamplePrompt = 'Want to try another sound?';
 
-  static const upperSoundIntro = 'One more. A slightly higher sound.';
+  /// Transient labels on the example button while shuffling (not spoken).
+  static const exampleLoadingLabel = 'Loading a new sound';
+  static const exampleLoadedLabel = 'New sound loaded';
 
-  static const exploreHigher = "Let's try one a little higher.";
+  static final lowerSoundIntro = TutorDialogues.s20.text;
 
-  static const exploreLower = "Let's try one a little lower.";
+  static final middleSoundIntro = TutorDialogues.s21.text;
 
-  static const softAffirmation = 'Good.';
+  static final upperSoundIntro = TutorDialogues.s22.text;
 
-  static const lowerAudibilityQuestion = 'Could you hear that sound clearly?';
+  static final exploreHigher = TutorDialogues.s23.text;
 
-  static const upperComfortQuestion = 'How did that feel?';
+  static final exploreLower = TutorDialogues.s24.text;
 
-  static const lowerNotClear = "That's okay. Let's try a little higher.";
+  static final softAffirmation = TutorDialogues.s26.text;
 
-  static const upperNotComfortable = "That's okay.";
+  static final lowerAudibilityQuestion = TutorDialogues.s25.text;
 
+  static final upperComfortQuestion = TutorDialogues.s30.text;
+
+  static final lowerNotClear = TutorDialogues.s27.text;
+
+  static final upperNotComfortable = TutorDialogues.s31.text;
+
+  /// Unused legacy constant (not spoken). Kept so older references stay safe.
   static const listenOnceMore = "That's okay. Listen once more.";
 
   /// First solo retry on a range point, before sing-along help.
-  static const rangeRetryOnce = "That's okay. Let's try once more.";
+  static final rangeRetryOnce = TutorDialogues.s12.text;
 
-  static const letMeHelpYou = 'Let me help you.';
+  static final letMeHelpYou = 'Let me help you.';
 
   /// Explains why sing-along practice is starting. Only used in assisted mode.
-  static const practiceTogether =
-      "That's okay. Let's practice it together so you can get familiar with the sound.";
+  static final practiceTogether = TutorDialogues.s34.text;
 
   /// Only spoken when the reference will keep playing while the user sings.
-  static const singAlongWithMe = 'Listen carefully, and sing along with me.';
+  static final singAlongWithMe = TutorDialogues.s35.text;
+
+  /// Spoken and shown while the assisted-singing reference is playing.
+  ///
+  /// Replaces any leftover countdown transcript (e.g. "1...") for that phase.
+  static final assistedSingAlongPrompt = TutorDialogues.s76.text;
 
   /// Spoken only after a confirmed user match during assisted singing.
   static const assistedReady = "Beautiful. You're ready.";
 
-  static const tryOnYourOwn = 'Now try that sound on your own.';
+  static final tryOnYourOwn = TutorDialogues.s38.text;
 
   /// Another practice pass when assisted singing could not confirm the singer.
-  static const practiceOnceMore =
-      "That's okay. Let's practice that sound together once more.";
+  static final practiceOnceMore = TutorDialogues.s37.text;
 
   /// After assisted practice, before offering a nearby sound.
-  static const makeThisEasier = "That's okay. Let's make this a little easier.";
+  static final makeThisEasier = TutorDialogues.s70.text;
 
   /// Yes/No question after a sound did not feel right.
   ///
   /// Does not name pitch, notes, or targets.
-  static const offerDifferentSound =
-      "That sound didn't feel quite right. Would you like to try a different one?";
-
-  /// Spoken when the user agrees to leave the stuck sound.
-  static const tryThisSound = "Lovely. Let's try this one.";
+  static final offerDifferentSound = TutorDialogues.s71.text;
 
   /// Spoken when the user wants to keep the current sound.
-  static const stayWithThisSound =
-      "That's perfectly okay. Let's stay with this one for now.";
+  static final stayWithThisSound = TutorDialogues.s73.text;
 
   /// Returns to Stage 1 listening without restarting the session.
-  static const stepBackToVoice =
-      "Let's take a small step back and listen to your voice once more.";
+  static final stepBackToVoice = TutorDialogues.s63.text;
 
-  static const letMeHelp = <String>['Let me help you.', 'Listen once more.'];
-
-  static const makeEasier = <String>[
-    "Let's make this easier.",
-    'Listen once more.',
+  static final letMeHelp = <String>[
+    'Let me help you.',
+    TutorDialogues.s18.text,
   ];
 
-  static const unclearYesNo = <String>[
-    "Sorry, I didn't quite catch that.",
-    'Just say yes or no.',
+  static final makeEasier = <String>[
+    TutorDialogues.s17.text,
+    TutorDialogues.s18.text,
   ];
 
-  static const unclearComfort = <String>[
-    "Sorry, I didn't quite catch that.",
-    'Just say comfortable or not comfortable.',
+  static final unclearYesNo = <String>[
+    TutorDialogues.s28.text,
+    TutorDialogues.s29.text,
+  ];
+
+  static final unclearComfort = <String>[
+    TutorDialogues.s28.text,
+    TutorDialogues.s32.text,
   ];
 
   static String completion(String shrutiLabel) =>
-      'Wonderful. We found a comfortable Shruti for you. Your Shruti is $shrutiLabel.';
+      '${TutorDialogues.s39.text} Your Shruti is $shrutiLabel.';
 
-  static const unresolved = <String>[
-    "We couldn't find a comfortable Shruti just yet.",
-    'We can try again whenever you like.',
+  static final unresolved = <String>[
+    TutorDialogues.s52.text,
+    TutorDialogues.s53.text,
   ];
+
+  // --- Tutor CTA labels (not spoken) ---
+
+  static const ctaLetsBegin = "Let's begin";
+
+  /// Secondary control under the Stage 1 instruction (not spoken).
+  static const hearSaLabel = 'Listen to an example';
+
+  /// Shown after Stage 1 instructions, before listening begins.
+  static const ctaImReadyToSingSa = "I'm ready to sing Sa";
+
+  /// Shown after Stage 1 success, before Stage 2.
+  static const ctaImReady = "I'm ready";
+
+  static const ctaLetsTryAgain = "Let's try again";
+
+  /// Shown after the Stage 2 lower-sound listen prompt (S74), before reference.
+  static const ctaPlayTheSound = 'Play the sound';
+
+  /// Lower audibility Yes (not spoken).
+  static const ctaHeardClearly = 'Yes, I could hear it';
+
+  /// Lower audibility No (not spoken).
+  static const ctaHardToHear = 'No, it was hard to hear';
+
+  /// Middle / upper comfort Yes (not spoken).
+  static const ctaComfortable = 'Comfortable';
+
+  /// Middle / upper comfort No (not spoken).
+  static const ctaNotComfortable = 'Not comfortable';
 }

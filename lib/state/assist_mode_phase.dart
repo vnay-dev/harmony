@@ -5,6 +5,7 @@ class AssistTimingConfig {
     this.settlingDuration = const Duration(milliseconds: 600),
     this.listenDuration = const Duration(seconds: 6),
     this.transitionDuration = const Duration(seconds: 2),
+    this.stage2EntryTransitionDuration = const Duration(milliseconds: 1),
     this.countdownStepDuration = const Duration(seconds: 1),
     this.assistedSingDuration,
   });
@@ -21,6 +22,12 @@ class AssistTimingConfig {
   /// Brief pause after listening before the next reference plays.
   final Duration transitionDuration;
 
+  /// Hold while publishing Stage 2 entry phases after the opening dialogue.
+  ///
+  /// The opening line already finished in afterListenWindow, so this is only a
+  /// brief yield for phase observers — not a user-facing pause.
+  final Duration stage2EntryTransitionDuration;
+
   /// Duration for each spoken/visual countdown step (3, 2, 1).
   final Duration countdownStepDuration;
 
@@ -35,7 +42,7 @@ class AssistTimingConfig {
 
 /// Which 3, 2, 1 lead-in the tutor should speak.
 enum AssistCountdownKind {
-  /// Solo turn: "Let's try singing it again in 3..."
+  /// Solo turn: first attempt or retry wording chosen from failure count.
   soloRetry,
 
   /// Sing-along turn: "Let's sing together in 3..."
@@ -133,6 +140,9 @@ enum AssistUiPhase {
 
   /// Lower Sa matched; waiting for audibility Yes / Too low.
   awaitingLowerAudibility,
+
+  /// Pa matched; waiting for Comfortable / Not comfortable.
+  awaitingPaComfort,
 
   /// Upper Sa matched; waiting for Comfortable / Strained.
   awaitingUpperComfort,

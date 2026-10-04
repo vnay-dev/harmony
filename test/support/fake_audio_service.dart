@@ -11,6 +11,9 @@ class FakeAudioService implements AudioService {
   int disposeCount = 0;
   final List<String> loadedAssets = <String>[];
 
+  /// When set, [play] awaits this before completing (for race tests).
+  Future<void>? blockPlay;
+
   bool _isPlaying = false;
   String? _currentAsset;
 
@@ -38,6 +41,10 @@ class FakeAudioService implements AudioService {
   @override
   Future<void> play() async {
     playCount += 1;
+    final gate = blockPlay;
+    if (gate != null) {
+      await gate;
+    }
     if (failPlay) {
       throw AudioServiceException('Failed to play the tanpura sample.');
     }

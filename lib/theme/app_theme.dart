@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'package:google_fonts/google_fonts.dart';
+
 import 'package:harmony/theme/design_tokens.dart';
 
 /// Builds the app [ThemeData] from [DesignTokens].
@@ -14,26 +16,28 @@ class AppTheme {
       onSurface: DesignTokens.onSurface,
     );
 
+    final baseTextTheme = TextTheme(
+      displaySmall: TextStyle(
+        fontSize: DesignTokens.fontSizeDisplay,
+        fontWeight: FontWeight.w600,
+        color: DesignTokens.onSurface,
+      ),
+      titleLarge: TextStyle(
+        fontSize: DesignTokens.fontSizeTitle,
+        fontWeight: FontWeight.w600,
+        color: DesignTokens.onSurface,
+      ),
+      bodyLarge: TextStyle(
+        fontSize: DesignTokens.fontSizeBody,
+        color: DesignTokens.onSurface,
+      ),
+    );
+
     return ThemeData(
       useMaterial3: true,
       colorScheme: colorScheme,
       scaffoldBackgroundColor: DesignTokens.background,
-      textTheme: const TextTheme(
-        displaySmall: TextStyle(
-          fontSize: DesignTokens.fontSizeDisplay,
-          fontWeight: FontWeight.w600,
-          color: DesignTokens.onSurface,
-        ),
-        titleLarge: TextStyle(
-          fontSize: DesignTokens.fontSizeTitle,
-          fontWeight: FontWeight.w600,
-          color: DesignTokens.onSurface,
-        ),
-        bodyLarge: TextStyle(
-          fontSize: DesignTokens.fontSizeBody,
-          color: DesignTokens.onSurface,
-        ),
-      ),
+      textTheme: GoogleFonts.manropeTextTheme(baseTextTheme),
     );
   }
 }

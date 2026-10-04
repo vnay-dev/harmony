@@ -1,71 +1,20 @@
+import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 
-/// Maps a tutor line to bundled recording ids `S01`–`S53` and `S59`–`S63`.
+/// Resolves spoken tutor lines to bundled recording ids.
 ///
-/// [TutorSession] keeps speaking the current script text. This catalog turns
-/// that text into asset ids. File paths stay here, not in the session.
-///
-/// [TutorScripts.orientation] still needs recordings `S54`–`S58`
-/// ([orientationRecordingIds]). Those lines stay in [linesWithoutRecording]
-/// and play no audio. The screen still shows them.
+/// Playback ids and transcript text both come from [TutorDialogues]. This
+/// catalog does not keep a second wording table — it only looks up the shared
+/// dialogue definition and returns its id / asset path.
 class TutorAudioCatalog {
   const TutorAudioCatalog._();
 
   static const assetDirectory = 'assets/audio/tutor';
 
+  /// Bundled ids: S01–S53, S60–S76. S54–S58 are reserved / not bundled.
   static final RegExp _assetIdPattern = RegExp(
-    r'^S(?:0[1-9]|[1-4][0-9]|5[0-3]|59|6[0-3])$',
+    r'^S(?:0[1-9]|[1-4][0-9]|5[0-3]|6[0-9]|7[0-6])$',
   );
-
-  /// Current script text to one or more recording ids.
-  ///
-  /// Completion is two clips: the celebration, then the Shruti name.
-  /// A few lines the finalized recordings dropped resolve to an empty list.
-  static final Map<String, List<String>> _lineAssets = <String, List<String>>{
-    TutorScripts.welcome[0]: <String>['S01'],
-    TutorScripts.welcome[1]: <String>['S02'],
-    TutorScripts.welcome[2]: <String>['S03'],
-    TutorScripts.discoverIntro[0]: <String>['S04'],
-    TutorScripts.discoverIntro[1]: <String>['S05'],
-    TutorScripts.discoverIntro[2]: <String>['S06'],
-    TutorScripts.countdown[0]: <String>['S07'],
-    TutorScripts.countdown[1]: <String>['S08'],
-    TutorScripts.countdown[2]: <String>['S09'],
-    TutorScripts.listenComplete: <String>['S10'],
-    TutorScripts.startingNoteSuccess[0]: <String>['S11'],
-    TutorScripts.startingNoteRetryOnce[0]: <String>['S12'],
-    TutorScripts.startingNoteRetryOnce[1]: <String>['S13'],
-    TutorScripts.startingNoteGuided[0]: <String>['S14'],
-    TutorScripts.listenFirst: <String>['S15'],
-    TutorScripts.nowTryThatSound: <String>['S16'],
-    TutorScripts.makeEasier[0]: <String>['S17'],
-    TutorScripts.makeEasier[1]: <String>['S18'],
-    TutorScripts.lowerSoundIntro: <String>['S20'],
-    TutorScripts.middleSoundIntro: <String>['S21'],
-    TutorScripts.upperSoundIntro: <String>['S22'],
-    TutorScripts.exploreHigher: <String>['S23'],
-    TutorScripts.exploreLower: <String>['S24'],
-    TutorScripts.lowerAudibilityQuestion: <String>['S25'],
-    TutorScripts.softAffirmation: <String>['S26'],
-    TutorScripts.lowerNotClear: <String>['S27'],
-    TutorScripts.unclearYesNo[0]: <String>['S28'],
-    TutorScripts.unclearYesNo[1]: <String>['S29'],
-    TutorScripts.upperComfortQuestion: <String>['S30'],
-    TutorScripts.upperNotComfortable: <String>['S31'],
-    TutorScripts.unclearComfort[1]: <String>['S32'],
-    TutorScripts.practiceTogether: <String>['S34'],
-    TutorScripts.singAlongWithMe: <String>['S35'],
-    TutorScripts.assistedCountdown[0]: <String>['S36'],
-    TutorScripts.practiceOnceMore: <String>['S37'],
-    TutorScripts.tryOnYourOwn: <String>['S38'],
-    TutorScripts.makeThisEasier: <String>['S59'],
-    TutorScripts.offerDifferentSound: <String>['S60'],
-    TutorScripts.tryThisSound: <String>['S61'],
-    TutorScripts.stayWithThisSound: <String>['S62'],
-    TutorScripts.stepBackToVoice: <String>['S63'],
-    TutorScripts.unresolved[0]: <String>['S52'],
-    TutorScripts.unresolved[1]: <String>['S53'],
-  };
 
   /// Spoken display label (`C`, `C#`, …) to the name clip.
   static const Map<String, String> shrutiAssetIds = <String, String>{
@@ -83,8 +32,8 @@ class TutorAudioCatalog {
     'B': 'S51',
   };
 
-  static const _completionPrefix =
-      'Wonderful. We found a comfortable Shruti for you. Your Shruti is ';
+  static final String _completionPrefix =
+      '${TutorDialogues.s39.text} Your Shruti is ';
 
   /// Recordings still needed for [TutorScripts.orientation], in speak order.
   ///
@@ -116,9 +65,12 @@ class TutorAudioCatalog {
       return const <String>[];
     }
 
-    final mapped = _lineAssets[trimmed];
-    if (mapped != null) {
-      return mapped;
+    final dialogue = TutorDialogues.byText(trimmed);
+    if (dialogue != null) {
+      if (TutorDialogues.reservedWithoutRecordingIds.contains(dialogue.id)) {
+        return const <String>[];
+      }
+      return <String>[dialogue.id];
     }
 
     final completion = _completionAssetIds(trimmed);
@@ -137,13 +89,18 @@ class TutorAudioCatalog {
     throw StateError('No tutor audio for: $trimmed');
   }
 
+  /// Exact dialogue definition for a spoken line, when one exists.
+  static TutorDialogue? dialogueForSpokenLine(String line) {
+    return TutorDialogues.byText(line.trim());
+  }
+
   /// Bundled path for [assetId], for example `assets/audio/tutor/S01.mp3`.
   static String assetPath(String assetId) {
     if (!_assetIdPattern.hasMatch(assetId)) {
       throw ArgumentError.value(
         assetId,
         'assetId',
-        'Expected a bundled tutor recording id (S01–S53 or S59–S63).',
+        'Expected a bundled tutor recording id (S01–S75).',
       );
     }
     return '$assetDirectory/$assetId.mp3';

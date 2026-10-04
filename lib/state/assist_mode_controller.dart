@@ -231,6 +231,19 @@ class AssistModeController extends ChangeNotifier {
   /// True when Stage 2 has latched a successful match for the current point.
   bool get didMatchCurrentRangeTarget => _rangeMatchAccepted;
 
+  /// Signed cents from the active Stage 2 target while listening.
+  ///
+  /// Positive means sharp of the target. `null` when not in a Stage 2 listen,
+  /// or when no stable pitch has been evaluated yet. Backed by
+  /// [TargetPitchMatcher.centsFromTarget] — not a second pitch calculation.
+  double? get liveCentsFromTarget {
+    if (_uiPhase != AssistUiPhase.listening ||
+        _stage != AssistStage.exploringRange) {
+      return null;
+    }
+    return _targetMatcher.centsFromTarget;
+  }
+
   /// Microphone energy while listening, from 0 (silence) to 1 (loud).
   ///
   /// Comes from the same pitch-detection audio window. Zero outside listening.
@@ -596,6 +609,81 @@ class AssistModeController extends ChangeNotifier {
     );
   }
 
+  /// Pa felt comfortable — continue to Upper Sa within the same candidate.
+  Future<void> reportPaComfortable() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.awaitingPaComfort ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    _isBusy = true;
+    notifyListeners();
+
+    final generation = _sessionGeneration;
+    final result = _activeCandidateResult;
+    result?.paComfortable = true;
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag PA_COMFORTABLE candidate=${_currentCandidate?.label}',
+      );
+    }
+
+    _currentRangePoint = AssistRangePoint.upperSa;
+    _rangeMatchAccepted = false;
+    _rangeVoiceHz = null;
+    _rangePointFailureCount = 0;
+    _assistedAttempts = 0;
+    _setPhase(AssistUiPhase.showingTransition);
+
+    try {
+      await _awaitPhase(timing.transitionDuration, generation);
+    } finally {
+      _isBusy = false;
+      if (!_isDisposed) {
+        notifyListeners();
+      }
+    }
+
+    if (!_isActive(generation)) {
+      return;
+    }
+    await _runRangeTestLoop(generation);
+  }
+
+  /// Pa felt strained — same adjustment path as a strained higher note.
+  Future<void> reportPaStrained() async {
+    if (_isBusy ||
+        _isDisposed ||
+        _uiPhase != AssistUiPhase.awaitingPaComfort ||
+        _stage != AssistStage.exploringRange) {
+      return;
+    }
+
+    _isBusy = true;
+    notifyListeners();
+
+    final generation = _sessionGeneration;
+    final result = _activeCandidateResult;
+    final current = _currentCandidate;
+    result?.paComfortable = false;
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag PA_STRAINED candidate=${current?.label} '
+        'mode=${_searchMode.name}',
+      );
+    }
+
+    await _handleMiddleOrUpperNotComfortable(
+      generation: generation,
+      current: current,
+      source: 'PA',
+    );
+  }
+
   /// Upper Sa felt comfortable.
   ///
   /// - Climbing after a fit: keep exploring higher until strain.
@@ -677,12 +765,35 @@ class AssistModeController extends ChangeNotifier {
     final result = _activeCandidateResult;
     final current = _currentCandidate;
     result?.upperSaComfortable = false;
+
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+        'mode=${_searchMode.name}',
+      );
+    }
+
+    await _handleMiddleOrUpperNotComfortable(
+      generation: generation,
+      current: current,
+      source: 'UPPER',
+    );
+  }
+
+  /// Shared "not comfortable" adjustment for middle (Pa) and higher (Upper Sa).
+  ///
+  /// Caller must already hold [_isBusy] and have recorded the comfort flag.
+  Future<void> _handleMiddleOrUpperNotComfortable({
+    required int generation,
+    required Pitch? current,
+    required String source,
+  }) async {
     _currentBoundaryShruti = current;
 
     if (_lastComfortableShruti != null) {
       if (kDebugMode) {
         debugPrint(
-          'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+          'AssistDiag ${source}_STRAINED candidate=${current?.label} '
           'lastComfortable=${_lastComfortableShruti?.label} → boundary',
         );
       }
@@ -693,14 +804,14 @@ class AssistModeController extends ChangeNotifier {
     }
 
     if (_searchMode == AssistShrutiSearchMode.seekingHigher) {
-      // Audible lower but strained upper while seeking after "too low" —
+      // Audible lower but strained middle/upper while seeking after "too low" —
       // no single supported Shruti fully fits.
       _setPhase(AssistUiPhase.rangeUnresolved);
       _isBusy = false;
       notifyListeners();
       if (kDebugMode) {
         debugPrint(
-          'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+          'AssistDiag ${source}_STRAINED candidate=${current?.label} '
           'while seekingHigher → unresolved',
         );
       }
@@ -715,7 +826,7 @@ class AssistModeController extends ChangeNotifier {
 
     if (kDebugMode) {
       debugPrint(
-        'AssistDiag UPPER_STRAINED candidate=${current?.label} '
+        'AssistDiag ${source}_STRAINED candidate=${current?.label} '
         '→ seekingLower',
       );
     }
@@ -809,10 +920,15 @@ class AssistModeController extends ChangeNotifier {
       }
     }
 
-    // Spoken + visual countdown before the mic opens.
-    final countedDown = await _runCountdown(generation);
-    if (!countedDown) {
-      return false;
+    // Stage 1: the user already tapped "I'm ready" — no spoken/visual countdown.
+    // Stage 2 still uses the 3…2…1 lead-in before each solo listen.
+    if (_stage == AssistStage.exploringRange) {
+      final countedDown = await _runCountdown(generation);
+      if (!countedDown) {
+        return false;
+      }
+    } else {
+      _countdownValue = null;
     }
 
     await tutorHooks?.beforeListen?.call();
@@ -914,12 +1030,13 @@ class AssistModeController extends ChangeNotifier {
       );
     }
 
-    // Brief "Got it" acknowledgment before Stage 2.
+    // Stage 2 opening already finished in afterListenWindow after "I'm ready".
+    // Use the short entry yield so the first range intro follows promptly.
     if (_uiPhase != AssistUiPhase.processing) {
       _setPhase(AssistUiPhase.processing);
     }
     notifyListeners();
-    await _awaitPhase(timing.transitionDuration, generation);
+    await _awaitPhase(timing.stage2EntryTransitionDuration, generation);
     if (!_isActive(generation)) {
       return false;
     }
@@ -1016,14 +1133,17 @@ class AssistModeController extends ChangeNotifier {
     _lowerSideAccessible = false;
     _prepareCandidate(_referencePitch);
 
+    // Keep entry phases for observers. The Stage 2 opening already finished in
+    // afterListenWindow, so do not add another multi-second silence before the
+    // first range intro ("Let's try a slightly lower sound.").
     _setPhase(AssistUiPhase.startingPointFound);
-    await _awaitPhase(timing.transitionDuration, generation);
+    await _awaitPhase(timing.stage2EntryTransitionDuration, generation);
     if (!_isActive(generation)) {
       return false;
     }
 
     _setPhase(AssistUiPhase.showingTransition);
-    await _awaitPhase(timing.transitionDuration, generation);
+    await _awaitPhase(timing.stage2EntryTransitionDuration, generation);
     if (!_isActive(generation)) {
       return false;
     }
@@ -1069,6 +1189,7 @@ class AssistModeController extends ChangeNotifier {
   /// True while Stage 2 is waiting on a user answer or has stopped exploring.
   bool get _isRangeDecisionPause =>
       _uiPhase == AssistUiPhase.awaitingLowerAudibility ||
+      _uiPhase == AssistUiPhase.awaitingPaComfort ||
       _uiPhase == AssistUiPhase.awaitingUpperComfort ||
       _uiPhase == AssistUiPhase.rangeBoundaryReached ||
       _uiPhase == AssistUiPhase.rangeUnresolved ||
@@ -1077,8 +1198,8 @@ class AssistModeController extends ChangeNotifier {
 
   /// Stage 2: play one range point → settle → countdown → listen for match.
   ///
-  /// On Lower Sa match: pause for audibility. On Pa match: continue to Upper
-  /// Sa. On Upper Sa match: pause for comfort. On no match: retry same point.
+  /// On Lower Sa match: pause for audibility. On Pa match: pause for comfort.
+  /// On Upper Sa match: pause for comfort. On no match: retry same point.
   Future<bool> _playAndMatchRangePoint(int generation) async {
     final targets = _rangeTargets;
     final point = _currentRangePoint;
@@ -1117,11 +1238,16 @@ class AssistModeController extends ChangeNotifier {
         return false;
       }
 
-      // 1) PLAY — synthesized reference on, analysis off.
-      _setPhase(AssistUiPhase.playingReference);
+      // Prepare silently while the spoken instruction screen is still up.
       _disablePitchAnalysis();
       await _safeStopDetection();
       await _safePauseAudio();
+      if (!_isActive(generation)) {
+        return false;
+      }
+
+      // 1) LISTEN SCREEN + PLAY — instruction text and reference begin together.
+      _setPhase(AssistUiPhase.playingReference);
       try {
         await _referenceSoundGenerator.playReference(
           targetHz,
@@ -1281,14 +1407,9 @@ class AssistModeController extends ChangeNotifier {
         return true;
       case AssistRangePoint.pa:
         result?.paMatched = true;
-        _currentRangePoint = AssistRangePoint.upperSa;
-        _rangeMatchAccepted = false;
-        _rangeVoiceHz = null;
-        _rangePointFailureCount = 0;
-        _assistedAttempts = 0;
-        _setPhase(AssistUiPhase.showingTransition);
-        await _awaitPhase(timing.transitionDuration, generation);
-        return _isActive(generation);
+        _setPhase(AssistUiPhase.awaitingPaComfort);
+        notifyListeners();
+        return true;
       case AssistRangePoint.upperSa:
         result?.upperSaMatched = true;
         _setPhase(AssistUiPhase.awaitingUpperComfort);
@@ -1458,7 +1579,11 @@ class AssistModeController extends ChangeNotifier {
   }
 
   /// Completes Stage 2 — plays the recommended Shruti (no comfort score).
+  ///
+  /// When a tutor is attached, the success dialogue finishes before the Shruti
+  /// sample starts so the two audio sources never overlap.
   Future<void> _completeRangeTest(Pitch candidate) async {
+    final generation = _sessionGeneration;
     _referencePitch = candidate;
     _stopListenProgress();
     _closeWindow();
@@ -1475,7 +1600,21 @@ class AssistModeController extends ChangeNotifier {
       );
     }
 
+    // Silence any prior sample / reference so tutor speech is alone.
+    await _safePauseAudio();
+    await _safeStopReferenceSound();
+    if (!_isActive(generation)) {
+      return;
+    }
+
     _setPhase(AssistUiPhase.completed);
+
+    // Tutor success dialogue must finish before Shruti playback.
+    await tutorHooks?.beforeCompletionPlayback?.call();
+    if (!_isActive(generation)) {
+      return;
+    }
+
     try {
       await _playReferenceForPitch(candidate);
     } on AudioServiceException catch (_) {
@@ -1838,11 +1977,16 @@ class AssistModeController extends ChangeNotifier {
     }
 
     if (_stage == AssistStage.exploringRange) {
+      final centsBefore = _targetMatcher.centsFromTarget;
       if (reading.hasPitch && reading.frequencyHz != null) {
         _rangeVoiceHz = reading.frequencyHz;
-        notifyListeners();
       }
       _targetMatcher.add(reading);
+      final centsAfter = _targetMatcher.centsFromTarget;
+      if ((reading.hasPitch && reading.frequencyHz != null) ||
+          centsBefore != centsAfter) {
+        notifyListeners();
+      }
       if (_targetMatcher.isMatched) {
         _tryAcceptRangeMatch(source: 'mid_listen');
       }
@@ -1957,9 +2101,9 @@ class AssistModeController extends ChangeNotifier {
       throw AudioServiceException('No tanpura sample is available for Sa.');
     }
     await _audioService.load(asset);
-    if (!_audioService.isPlaying) {
-      await _audioService.play();
-    }
+    // Always start (or restart) after an explicit pause before completion
+    // speech. Do not skip play when a prior sample was already running.
+    await _audioService.play();
   }
 
   Future<void> _resetToIntro() async {

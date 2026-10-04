@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:material_symbols_icons/material_symbols_icons.dart';
 
 import 'package:harmony/audio/audio_service.dart';
 import 'package:harmony/audio/just_audio_service.dart';
@@ -13,11 +16,17 @@ import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
 import 'package:harmony/tutor/asset_tutor_voice.dart';
 import 'package:harmony/tutor/speech_to_text_recognizer.dart';
+import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_session.dart';
 import 'package:harmony/tutor/tutor_speech_recognizer.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
 import 'package:harmony/tutor/tutor_voice.dart';
-import 'package:harmony/ui/components/voice_activity_indicator.dart';
+import 'package:harmony/ui/components/pitch_direction_dial.dart';
+import 'package:harmony/ui/components/shruti_reveal_celebration.dart';
+import 'package:harmony/ui/components/tutor_action_button.dart';
+import 'package:harmony/ui/components/tutor_dialogue_text.dart';
+import 'package:harmony/ui/components/tutor_hear_sa_control.dart';
+import 'package:harmony/ui/components/tutor_presence_circle.dart';
 
 /// Voice-first singing tutor that finds a comfortable Shruti.
 class AssistModeScreen extends StatefulWidget {
@@ -76,7 +85,7 @@ class AssistModeScreen extends StatefulWidget {
   /// Optional audio-session setup override (tests inject a no-op).
   final Future<void> Function()? prepareAudioSession;
 
-  /// When true (default), welcome speech runs and the session auto-starts.
+  /// When true (default), welcome speech runs and waits for "Let's begin".
   final bool autoBegin;
 
   @override
@@ -151,6 +160,24 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     }
   }
 
+  void _goHome() {
+    // Detach before teardown so stop()/pop cannot rebuild a dying route.
+    _tutor.removeListener(_onTutorChanged);
+    _controller.removeListener(_onTutorChanged);
+
+    if (_tutor.step != TutorStep.complete && _tutor.step != TutorStep.stopped) {
+      // Start cancellation without awaiting listen/wait teardown.
+      unawaited(_tutor.stop());
+    }
+    if (!mounted) {
+      return;
+    }
+    final navigator = Navigator.of(context, rootNavigator: true);
+    if (navigator.canPop()) {
+      navigator.pop();
+    }
+  }
+
   @override
   void dispose() {
     _tutor.removeListener(_onTutorChanged);
@@ -169,112 +196,35 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Find your Shruti')),
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        title: Text(
+          'Tutor Mode',
+          style: textTheme.titleMedium?.copyWith(
+            color: colorScheme.onSurface.withValues(alpha: 0.62),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        actions: [
+          if (_tutor.showHome)
+            IconButton(
+              key: const ValueKey<String>('tutor-home'),
+              tooltip: 'Home',
+              onPressed: _goHome,
+              icon: Icon(
+                Icons.home_rounded,
+                color: colorScheme.onSurface.withValues(alpha: 0.55),
+              ),
+            ),
+        ],
+      ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(DesignTokens.spaceLg),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    return SingleChildScrollView(
-                      key: const ValueKey<String>('assist-content-scroll'),
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          minHeight: constraints.maxHeight,
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (_tutor.showJourneyProgress) ...[
-                              _TutorJourneyProgress(
-                                tutor: _tutor,
-                                textTheme: textTheme,
-                                colorScheme: colorScheme,
-                              ),
-                              const SizedBox(height: DesignTokens.spaceXl),
-                            ],
-                            if (_tutor.confirmedShrutiLabel != null) ...[
-                              Text(
-                                _tutor.confirmedShrutiLabel!,
-                                key: const ValueKey<String>(
-                                  'assist-confirmed-shruti',
-                                ),
-                                style: textTheme.displaySmall,
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: DesignTokens.spaceLg),
-                            ],
-                            if (_tutor.showCountdown) ...[
-                              _CountdownDisplay(
-                                value: _tutor.countdownValue ?? 0,
-                                colorScheme: colorScheme,
-                                textTheme: textTheme,
-                              ),
-                              const SizedBox(height: DesignTokens.spaceLg),
-                            ] else ...[
-                              Text(
-                                _tutor.headline,
-                                key: ValueKey<String>(
-                                  'assist-headline-${_tutor.step.name}',
-                                ),
-                                style: textTheme.titleLarge,
-                                textAlign: TextAlign.center,
-                              ),
-                              if (_tutor.supportText != null) ...[
-                                const SizedBox(height: DesignTokens.spaceMd),
-                                Text(
-                                  _tutor.supportText!,
-                                  key: ValueKey<String>(
-                                    'assist-support-${_tutor.step.name}',
-                                  ),
-                                  style: textTheme.bodyLarge?.copyWith(
-                                    color: colorScheme.onSurface.withValues(
-                                      alpha: 0.72,
-                                    ),
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                              ],
-                            ],
-                            if (_controller.uiPhase ==
-                                AssistUiPhase.listening) ...[
-                              const SizedBox(height: DesignTokens.spaceXl),
-                              VoiceActivityIndicator(
-                                level: _controller.voiceActivity,
-                              ),
-                            ],
-                            if (_tutor.showListenProgress) ...[
-                              const SizedBox(height: DesignTokens.spaceLg),
-                              _ListenProgress(
-                                progress: _controller.listenProgress,
-                                colorScheme: colorScheme,
-                              ),
-                            ],
-                            if (_controller.uiPhase ==
-                                    AssistUiPhase.playingReference ||
-                                _controller.uiPhase ==
-                                    AssistUiPhase.assistedSinging) ...[
-                              const SizedBox(height: DesignTokens.spaceXl),
-                              Icon(
-                                Icons.graphic_eq,
-                                size: 36,
-                                color: colorScheme.primary,
-                                key: const ValueKey<String>(
-                                  'assist-playing-icon',
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
+              Expanded(child: _buildTutorSurface()),
               const SizedBox(height: DesignTokens.spaceMd),
               ..._buildActions(),
             ],
@@ -284,347 +234,267 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     );
   }
 
-  List<Widget> _buildActions() {
-    final busy = _controller.isBusy || _tutor.isSpeaking;
+  /// Circle slot above an independent transcript region.
+  ///
+  /// Shared by Stage 1, Stage 2, and terminal states so the calm circle +
+  /// dialogue composition never flips to the old headline surface.
+  Widget _buildTutorSurface() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                RepaintBoundary(
+                  child: SizedBox(
+                    height: TutorPresenceCircle.slotSize,
+                    width: double.infinity,
+                    child: Center(
+                      child: TutorPresenceCircle(
+                        state: _tutor.presenceState,
+                        voiceLevel: _controller.voiceActivity,
+                      ),
+                    ),
+                  ),
+                ),
+                // Supporting Stage 2 listen cue — keeps circle + dialogue hierarchy.
+                if (_controller.uiPhase == AssistUiPhase.listening &&
+                    _controller.isExploringRange) ...[
+                  const SizedBox(height: DesignTokens.spaceMd),
+                  PitchDirectionDial(
+                    centsFromTarget: _controller.liveCentsFromTarget,
+                  ),
+                  const SizedBox(height: DesignTokens.spaceMd),
+                ] else
+                  const SizedBox(height: DesignTokens.spaceLg),
+                _TutorDialogueContent(tutor: _tutor),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
+  List<Widget> _buildActions() {
+    // Terminal CTAs stay available even if completion speech is finishing.
     if (_tutor.showPlayMyShruti) {
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-play-my-shruti'),
-            onPressed: busy
-                ? null
-                : () {
-                    final pitch = _controller.referencePitch;
-                    Navigator.of(context).pop<Pitch>(pitch);
-                  },
-            child: const Text('Play My Shruti'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-play-my-shruti'),
+          label: 'Play My Shruti',
+          onPressed: _tutor.isSpeaking
+              ? null
+              : () {
+                  final pitch = _controller.referencePitch;
+                  Navigator.of(context).pop<Pitch>(pitch);
+                },
         ),
         const SizedBox(height: DesignTokens.spaceMd),
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: OutlinedButton(
-            key: const ValueKey<String>('assist-try-again'),
-            onPressed: busy ? null : _tutor.tryAgain,
-            child: const Text('Try Again'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-try-again'),
+          label: 'Try Again',
+          primary: false,
+          onPressed: _tutor.isSpeaking ? null : _tutor.tryAgain,
         ),
       ];
     }
 
     if (_tutor.showSessionStopped) {
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-session-stopped-try-again'),
-            onPressed: _tutor.tryAgain,
-            child: const Text('Try Again'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-session-stopped-try-again'),
+          label: 'Try Again',
+          onPressed: _tutor.tryAgain,
         ),
       ];
+    }
+
+    // No in-flow CTAs while Harmony is speaking — same as Stage 1.
+    if (_tutor.isSpeaking) {
+      return const [];
     }
 
     if (_tutor.showDifferentSoundChoice) {
       final canAnswer = _tutor.canAnswerDifferentSound;
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-different-sound-yes'),
-            onPressed: canAnswer
-                ? () => _tutor.answerDifferentSound(true)
-                : null,
-            child: const Text('Yes'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-different-sound-yes'),
+          label: 'Yes',
+          onPressed: canAnswer ? () => _tutor.answerDifferentSound(true) : null,
         ),
         const SizedBox(height: DesignTokens.spaceMd),
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: OutlinedButton(
-            key: const ValueKey<String>('assist-different-sound-no'),
-            onPressed: canAnswer
-                ? () => _tutor.answerDifferentSound(false)
-                : null,
-            child: const Text('No'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-different-sound-no'),
+          label: 'No',
+          primary: false,
+          onPressed: canAnswer
+              ? () => _tutor.answerDifferentSound(false)
+              : null,
         ),
-        const SizedBox(height: DesignTokens.spaceMd),
-        _stopButton(),
       ];
     }
 
     if (_tutor.showYesNoFallback) {
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-lower-audible-yes'),
-            onPressed: busy ? null : () => _tutor.answerLowerAudibility(true),
-            child: const Text('Yes'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-lower-audible-yes'),
+          label: TutorScripts.ctaHeardClearly,
+          onPressed: () => _tutor.answerLowerAudibility(true),
         ),
         const SizedBox(height: DesignTokens.spaceMd),
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: OutlinedButton(
-            key: const ValueKey<String>('assist-lower-too-low'),
-            onPressed: busy ? null : () => _tutor.answerLowerAudibility(false),
-            child: const Text('No'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-lower-too-low'),
+          label: TutorScripts.ctaHardToHear,
+          primary: false,
+          onPressed: () => _tutor.answerLowerAudibility(false),
         ),
-        const SizedBox(height: DesignTokens.spaceMd),
-        _stopButton(),
       ];
     }
 
     if (_tutor.showComfortFallback) {
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-upper-comfortable'),
-            onPressed: busy ? null : () => _tutor.answerUpperComfort(true),
-            child: const Text('Comfortable'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-upper-comfortable'),
+          label: TutorScripts.ctaComfortable,
+          onPressed: () => _tutor.answerUpperComfort(true),
         ),
         const SizedBox(height: DesignTokens.spaceMd),
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: OutlinedButton(
-            key: const ValueKey<String>('assist-upper-strained'),
-            onPressed: busy ? null : () => _tutor.answerUpperComfort(false),
-            child: const Text('Not comfortable'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-upper-strained'),
+          label: TutorScripts.ctaNotComfortable,
+          primary: false,
+          onPressed: () => _tutor.answerUpperComfort(false),
         ),
-        const SizedBox(height: DesignTokens.spaceMd),
-        _stopButton(),
       ];
     }
 
     if (_tutor.showTryAgain) {
       return [
-        SizedBox(
-          height: DesignTokens.controlHeight,
-          child: FilledButton(
-            key: const ValueKey<String>('assist-unresolved-try-again'),
-            onPressed: busy
-                ? null
-                : () {
-                    if (_tutor.step == TutorStep.startingNoteFailure) {
-                      _tutor.retryStartingNote();
-                    } else {
-                      _tutor.tryAgain();
-                    }
-                  },
-            child: const Text('Try Again'),
-          ),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-unresolved-try-again'),
+          label: 'Try Again',
+          onPressed: _tutor.tryAgain,
         ),
-        const SizedBox(height: DesignTokens.spaceMd),
-        _stopButton(),
       ];
     }
 
-    if (_tutor.showStop) {
-      return [_stopButton()];
+    if (_tutor.showPrimaryAction) {
+      final label = _tutor.primaryActionLabel ?? '';
+      return [
+        TutorActionButton(
+          key: ValueKey<String>('assist-primary-$label'),
+          label: label,
+          onPressed: _tutor.continuePrimaryAction,
+        ),
+      ];
     }
 
-    // Welcome — no CTA; voice auto-continues.
     return const [];
   }
-
-  Widget _stopButton() {
-    return SizedBox(
-      height: DesignTokens.controlHeight,
-      child: OutlinedButton(
-        key: const ValueKey<String>('assist-stop'),
-        onPressed: _tutor.stop,
-        child: const Text('Stop'),
-      ),
-    );
-  }
 }
 
-class _TutorJourneyProgress extends StatelessWidget {
-  const _TutorJourneyProgress({
-    required this.tutor,
-    required this.textTheme,
-    required this.colorScheme,
-  });
+/// Stable transcript + optional Stage 1 example controls (circle-independent).
+class _TutorDialogueContent extends StatelessWidget {
+  const _TutorDialogueContent({required this.tutor});
 
   final TutorSession tutor;
-  final TextTheme textTheme;
-  final ColorScheme colorScheme;
+
+  /// Keeps dialogue / controls from shifting the circle on Stage 1.
+  static const double _dialogueSlotHeight = 120;
+
+  /// Caps listen-prompt type size so the music cue can sit close beneath it.
+  static const double _referenceListenTextMaxHeight = 64;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      key: const ValueKey<String>('tutor-journey'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          TutorSession.journeyHeading,
-          key: const ValueKey<String>('tutor-journey-heading'),
-          style: textTheme.bodyLarge?.copyWith(
-            color: colorScheme.onSurface.withValues(alpha: 0.62),
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: DesignTokens.spaceSm),
-        for (final stage in TutorJourneyStage.values)
-          _JourneyStageRow(
-            stage: stage,
-            mark: tutor.journeyMark(stage),
-            label: TutorSession.journeyLabel(stage),
-            textTheme: textTheme,
-            colorScheme: colorScheme,
-          ),
-      ],
-    );
-  }
-}
+    final dialogue = tutor.dialogueText;
+    final showExample = tutor.showHearSa;
+    final confirmed = tutor.confirmedShrutiLabel;
+    final showReferenceListenCue =
+        dialogue == TutorScripts.referenceListenPrompt;
 
-class _JourneyStageRow extends StatelessWidget {
-  const _JourneyStageRow({
-    required this.stage,
-    required this.mark,
-    required this.label,
-    required this.textTheme,
-    required this.colorScheme,
-  });
+    // Completion already emphasizes the Shruti name; let dialogue size naturally.
+    final useFixedDialogueSlot = confirmed == null;
 
-  final TutorJourneyStage stage;
-  final TutorJourneyMark mark;
-  final String label;
-  final TextTheme textTheme;
-  final ColorScheme colorScheme;
-
-  @override
-  Widget build(BuildContext context) {
-    final current = mark == TutorJourneyMark.current;
-    final complete = mark == TutorJourneyMark.complete;
-    final labelColor = colorScheme.onSurface.withValues(
-      alpha: current ? 1 : (complete ? 0.62 : 0.38),
-    );
-    final markColor = current
-        ? colorScheme.primary
-        : colorScheme.onSurface.withValues(alpha: complete ? 0.45 : 0.28);
-    final spokenMark = switch (mark) {
-      TutorJourneyMark.complete => 'Completed',
-      TutorJourneyMark.current => 'Current',
-      TutorJourneyMark.upcoming => 'Later',
-    };
-
-    return Semantics(
-      container: true,
-      label: '$spokenMark, $label',
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: DesignTokens.spaceXs),
-        child: Row(
-          key: ValueKey<String>('tutor-journey-${stage.name}-${mark.name}'),
-          children: [
-            ExcludeSemantics(
-              child: _JourneyMark(mark: mark, color: markColor),
+    final dialogueText = dialogue == null
+        ? const SizedBox.shrink()
+        : TutorDialogueText(
+            // Key by the on-screen text (not stale activeDialogue id) so a
+            // leftover countdown id such as S09 cannot keep a widget alive
+            // across the listen-prompt → countdown transition.
+            key: ValueKey<String>(
+              'tutor-dialogue-$dialogue'
+              '${tutor.isDialogueInstruction ? '-hint' : ''}',
             ),
-            const SizedBox(width: DesignTokens.spaceSm),
-            Expanded(
-              child: Text(
-                label,
-                style: textTheme.bodyLarge?.copyWith(
-                  color: labelColor,
-                  fontWeight: current ? FontWeight.w600 : FontWeight.w400,
+            text: dialogue,
+            isSpeaking: tutor.isSpeaking,
+            isInstruction: tutor.isDialogueInstruction,
+          );
+
+    // Compact text + two-note cue as one instruction unit (gap is spaceSm only).
+    final dialogueChild = showReferenceListenCue
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxHeight: _referenceListenTextMaxHeight,
                 ),
+                child: dialogueText,
               ),
+              const SizedBox(height: DesignTokens.spaceSm),
+              Icon(
+                Symbols.music_note_2,
+                key: const ValueKey<String>('assist-reference-listen-cue'),
+                size: 28,
+                fill: 1.0,
+                color: DesignTokens.muted.withValues(alpha: 0.72),
+              ),
+            ],
+          )
+        : dialogueText;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (confirmed != null) ...[
+          ShrutiRevealCelebration(
+            key: ValueKey<String>('assist-shruti-celebration-$confirmed'),
+            child: Text(
+              confirmed,
+              key: const ValueKey<String>('assist-confirmed-shruti'),
+              style: Theme.of(context).textTheme.displaySmall,
+              textAlign: TextAlign.center,
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _JourneyMark extends StatelessWidget {
-  const _JourneyMark({required this.mark, required this.color});
-
-  final TutorJourneyMark mark;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    final icon = switch (mark) {
-      TutorJourneyMark.complete => Icons.check,
-      TutorJourneyMark.current => Icons.circle,
-      TutorJourneyMark.upcoming => Icons.circle_outlined,
-    };
-    final size = switch (mark) {
-      TutorJourneyMark.complete => 16.0,
-      TutorJourneyMark.current => 10.0,
-      TutorJourneyMark.upcoming => 8.0,
-    };
-    return SizedBox(
-      width: 20,
-      height: 20,
-      child: Center(
-        child: Icon(icon, size: size, color: color),
-      ),
-    );
-  }
-}
-
-class _CountdownDisplay extends StatelessWidget {
-  const _CountdownDisplay({
-    required this.value,
-    required this.colorScheme,
-    required this.textTheme,
-  });
-
-  final int value;
-  final ColorScheme colorScheme;
-  final TextTheme textTheme;
-
-  @override
-  Widget build(BuildContext context) {
-    final label = '$value';
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 220),
-      layoutBuilder: (currentChild, previousChildren) {
-        return currentChild ?? const SizedBox.shrink();
-      },
-      transitionBuilder: (child, animation) {
-        return FadeTransition(opacity: animation, child: child);
-      },
-      child: Text(
-        label,
-        key: ValueKey<String>('tutor-countdown-$label'),
-        style: textTheme.displaySmall?.copyWith(
-          color: colorScheme.primary,
-          fontWeight: FontWeight.w600,
-        ),
-        textAlign: TextAlign.center,
-      ),
-    );
-  }
-}
-
-class _ListenProgress extends StatelessWidget {
-  const _ListenProgress({required this.progress, required this.colorScheme});
-
-  final double progress;
-  final ColorScheme colorScheme;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
-      child: LinearProgressIndicator(
-        key: const ValueKey<String>('assist-listen-progress'),
-        value: progress.clamp(0.0, 1.0),
-        minHeight: 8,
-        backgroundColor: colorScheme.primary.withValues(alpha: 0.16),
-        color: colorScheme.primary,
-      ),
+          ),
+          const SizedBox(height: DesignTokens.spaceMd),
+        ],
+        if (useFixedDialogueSlot)
+          SizedBox(
+            height: _dialogueSlotHeight,
+            width: double.infinity,
+            child: dialogueChild,
+          )
+        else
+          SizedBox(width: double.infinity, child: dialogueChild),
+        // Keep the example controls visually separate from the instruction.
+        if (showExample) ...[
+          const SizedBox(height: 28),
+          TutorHearSaControl(
+            isPlaying: tutor.isHearSaPlaying,
+            phase: tutor.exampleControlPhase,
+            onPressed: tutor.toggleHearSa,
+          ),
+          if (tutor.showShuffleExample)
+            TutorShuffleExampleAction(
+              enabled: tutor.canShuffleExample,
+              onPressed: tutor.shuffleExampleSound,
+            ),
+        ],
+      ],
     );
   }
 }

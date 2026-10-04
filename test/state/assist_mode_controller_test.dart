@@ -12,6 +12,7 @@ import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
+import 'package:harmony/tutor/assist_tutor_hooks.dart';
 
 import '../support/fake_audio_service.dart';
 import '../support/fake_pitch_detection_service.dart';
@@ -94,6 +95,8 @@ void main() {
       final phase = controller.uiPhase;
       if (phase == AssistUiPhase.awaitingLowerAudibility) {
         await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingPaComfort) {
+        await controller.reportPaComfortable();
       } else if (phase == AssistUiPhase.awaitingUpperComfort) {
         if (!markedFirstComfortable) {
           markedFirstComfortable = true;
@@ -112,6 +115,19 @@ void main() {
         await Future<void>.delayed(Duration.zero);
       }
     }
+  }
+
+  Future<void> waitUntil(
+    bool Function() condition, {
+    int attempts = 200,
+  }) async {
+    for (var i = 0; i < attempts; i++) {
+      if (condition()) {
+        return;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+    fail('Condition not met in time');
   }
 
   AssistModeController buildController({
@@ -426,6 +442,55 @@ void main() {
     expect(audioService.isPlaying, isTrue);
     expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.d));
   });
+
+  test(
+    'completion awaits beforeCompletionPlayback before Shruti sample',
+    () async {
+      late final AssistModeController controller;
+      final holdSpeech = Completer<void>();
+      var hookEntered = false;
+      var playCountAtHook = -1;
+
+      controller = buildController(
+        service: detectionService,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
+              await emitPitch(detectionService, Pitch.d);
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      controller.tutorHooks = AssistTutorHooks(
+        beforeCompletionPlayback: () async {
+          hookEntered = true;
+          playCountAtHook = audioService.playCount;
+          expect(audioService.isPlaying, isFalse);
+          await holdSpeech.future;
+        },
+      );
+
+      await controller.startSession();
+      final finish = finishStage2WithoutClimbing(controller);
+
+      await waitUntil(() => hookEntered);
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(playCountAtHook, 0);
+      expect(audioService.isPlaying, isFalse);
+      expect(audioService.playCount, 0);
+
+      holdSpeech.complete();
+      await finish;
+
+      expect(audioService.isPlaying, isTrue);
+      expect(audioService.playCount, greaterThan(0));
+      expect(controller.referencePitch, Pitch.d);
+    },
+  );
 
   test('stable C input becomes Stage 2 starting point C', () async {
     late final AssistModeController controller;

@@ -134,4 +134,44 @@ void main() {
       expect(info.waveId, 'WAVE');
     });
   });
+
+  group('buildLoopableReferenceToneWav', () {
+    test('stays below clipping and keeps the requested fundamental', () {
+      final hz = frequencyHzForPitch(Pitch.g);
+      final wav = buildLoopableReferenceToneWav(frequencyHz: hz);
+      final info = inspectReferenceToneWav(wav);
+      expect(info.isValid, isTrue, reason: info.summary);
+
+      final data = ByteData.sublistView(wav);
+      final sampleCount = data.getUint32(40, Endian.little) ~/ 2;
+      var peak = 0;
+      for (var i = 0; i < sampleCount; i++) {
+        final sample = data.getInt16(44 + i * 2, Endian.little).abs();
+        if (sample > peak) {
+          peak = sample;
+        }
+      }
+      expect(peak, greaterThan(8000));
+      expect(peak, lessThan(32000));
+
+      final estimated = estimateWavFundamentalHz(wav);
+      expect(estimated, isNotNull);
+      expect(estimated!, closeTo(hz, hz * 0.06));
+    });
+
+    test('wrap-around step matches a normal adjacent step', () {
+      final wav = buildLoopableReferenceToneWav(
+        frequencyHz: 196,
+        approximateDuration: const Duration(milliseconds: 800),
+      );
+      final data = ByteData.sublistView(wav);
+      final sampleCount = data.getUint32(40, Endian.little) ~/ 2;
+      int sampleAt(int index) =>
+          data.getInt16(44 + index * 2, Endian.little);
+      final wrapJump = (sampleAt(0) - sampleAt(sampleCount - 1)).abs();
+      final startJump = (sampleAt(1) - sampleAt(0)).abs();
+      // Integer-cycle phase means the loop boundary is just another sample step.
+      expect(wrapJump, closeTo(startJump, 2));
+    });
+  });
 }

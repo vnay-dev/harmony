@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter/material.dart';
 import 'package:harmony/theme/design_tokens.dart';
 
 void main() {
@@ -15,5 +16,12 @@ void main() {
     expect(DesignTokens.fontSizeBody, 16);
     expect(DesignTokens.fontSizeTitle, 24);
     expect(DesignTokens.fontSizeDisplay, 32);
+  });
+
+  test('listeningAccent stays in the warm listening family, not blue accent', () {
+    expect(DesignTokens.listeningAccent, isNot(DesignTokens.accent));
+    expect(DesignTokens.listeningAccent, isNot(DesignTokens.listeningEdge));
+    // Soft apricot between rim and edge — lighter than the orb's darkest rim.
+    expect(DesignTokens.listeningAccent, const Color(0xFFE5B584));
   });
 }

@@ -18,6 +18,12 @@ class DroneController extends ChangeNotifier {
   bool _isBusy = false;
   String? _errorMessage;
 
+  /// Bumped when Home-owned playback must yield (e.g. leaving Home).
+  ///
+  /// In-flight [togglePlayback] / [playPitch] calls check this so they cannot
+  /// restart audio after the Home practice flow has been exited.
+  int _playbackEpoch = 0;
+
   Pitch get selectedPitch => _selectedPitch;
   bool get isPlaying => _isPlaying;
   bool get isBusy => _isBusy;
@@ -100,6 +106,7 @@ class DroneController extends ChangeNotifier {
       return;
     }
 
+    final epoch = _playbackEpoch;
     _isBusy = true;
     _errorMessage = null;
     _selectedPitch = pitch;
@@ -113,7 +120,17 @@ class DroneController extends ChangeNotifier {
         return;
       }
       await _audioService.load(asset);
+      if (!_isPlaybackEpochCurrent(epoch)) {
+        await _audioService.pause();
+        _isPlaying = false;
+        return;
+      }
       await _audioService.play();
+      if (!_isPlaybackEpochCurrent(epoch)) {
+        await _audioService.pause();
+        _isPlaying = false;
+        return;
+      }
       _isPlaying = true;
     } on AudioServiceException catch (error) {
       _errorMessage = error.message;
@@ -127,12 +144,36 @@ class DroneController extends ChangeNotifier {
     }
   }
 
+  /// Stops Home-owned continuous playback (e.g. when leaving the Home flow).
+  ///
+  /// Safe to call when already paused. Invalidates in-flight play requests so
+  /// they cannot restart audio after this returns.
+  Future<void> pausePlayback() async {
+    _playbackEpoch++;
+    _errorMessage = null;
+
+    try {
+      await _audioService.pause();
+      _isPlaying = false;
+    } on AudioServiceException catch (error) {
+      _errorMessage = error.message;
+      _isPlaying = _audioService.isPlaying;
+    } catch (_) {
+      _errorMessage = 'Failed to pause playback.';
+      _isPlaying = _audioService.isPlaying;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
   /// Toggles between play and pause.
   Future<void> togglePlayback() async {
     if (_isBusy) {
       return;
     }
 
+    final epoch = _playbackEpoch;
     _isBusy = true;
     _errorMessage = null;
     notifyListeners();
@@ -149,7 +190,17 @@ class DroneController extends ChangeNotifier {
           return;
         }
         await _audioService.load(asset);
+        if (!_isPlaybackEpochCurrent(epoch)) {
+          await _audioService.pause();
+          _isPlaying = false;
+          return;
+        }
         await _audioService.play();
+        if (!_isPlaybackEpochCurrent(epoch)) {
+          await _audioService.pause();
+          _isPlaying = false;
+          return;
+        }
         _isPlaying = true;
       }
     } on AudioServiceException catch (error) {
@@ -165,6 +216,8 @@ class DroneController extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  bool _isPlaybackEpochCurrent(int epoch) => epoch == _playbackEpoch;
 
   @override
   void dispose() {

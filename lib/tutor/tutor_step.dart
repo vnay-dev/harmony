@@ -13,6 +13,7 @@ enum TutorStep {
   testLower,
   askLowerAudibility,
   testMiddle,
+  askMiddleComfort,
   testUpper,
   askUpperComfort,
   exploreNextShruti,
@@ -22,6 +23,33 @@ enum TutorStep {
   complete,
   unresolved,
   stopped,
+}
+
+/// Bottom CTA the tutor is waiting on (Stage 1 readiness / Stage 2 play).
+enum TutorPrimaryAction {
+  none,
+  letsBegin,
+  imReadyToListen,
+  imReadyForNextStep,
+  letsTryAgain,
+
+  /// Stage 2: user confirms before the first Lower Sa reference plays.
+  playTheSound,
+}
+
+/// Visual state of the persistent tutor presence circle.
+enum TutorPresenceState { idle, speaking, listening, success }
+
+/// Visual phase of the Stage 1 "Listen to an example" control.
+enum TutorExampleControlPhase {
+  /// Idle / playing — normal label and play/pause icon.
+  idle,
+
+  /// Preparing a different synthesized reference tone.
+  loading,
+
+  /// Brief affirmation that the new tone is ready (not auto-played).
+  loaded,
 }
 
 /// How much help the tutor gives after repeated struggle.
