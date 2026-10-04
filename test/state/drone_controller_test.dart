@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/audio/audio_assets.dart';
@@ -110,6 +112,47 @@ void main() {
     await controller.togglePlayback();
     expect(controller.isPlaying, isFalse);
     expect(audioService.pauseCount, 1);
+  });
+
+  test('pausePlayback stops Home-owned continuous audio', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    await controller.pausePlayback();
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+    expect(audioService.pauseCount, greaterThanOrEqualTo(1));
+  });
+
+  test('pausePlayback is a no-op when already paused', () async {
+    await controller.initialize();
+    final pauseCountBefore = audioService.pauseCount;
+
+    await controller.pausePlayback();
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.pauseCount, pauseCountBefore + 1);
+  });
+
+  test('pausePlayback cancels in-flight togglePlayback play', () async {
+    await controller.initialize();
+    final gate = Completer<void>();
+    audioService.blockPlay = gate.future;
+
+    final toggleFuture = controller.togglePlayback();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isBusy, isTrue);
+
+    await controller.pausePlayback();
+    expect(controller.isPlaying, isFalse);
+
+    gate.complete();
+    await toggleFuture;
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
   });
 
   test('togglePlayback surfaces play errors', () async {

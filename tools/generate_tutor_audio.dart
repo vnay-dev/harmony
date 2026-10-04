@@ -16,6 +16,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:harmony/tutor/tutor_dialogue.dart';
+
 /// Stable ElevenLabs model for natural English speech.
 const String ttsModelId = 'eleven_multilingual_v2';
 
@@ -35,99 +37,35 @@ const String _apiHost = 'api.elevenlabs.io';
 const String _outputDirectory = 'assets/audio/tutor';
 const Duration _requestTimeout = Duration(seconds: 90);
 
-/// Finalized tutor lines. Wording is fixed; this script does not read the doc.
-const List<TutorLine> tutorLines = [
-  TutorLine('S01', 'Hi. I\'ll help you find a comfortable Shruti.'),
-  TutorLine('S02', 'You don\'t need to know anything about singing.'),
-  TutorLine('S03', 'Settle in, and follow my voice.'),
-  TutorLine('S04', 'Let\'s begin gently.'),
-  TutorLine('S05', 'Sing or hum a sound that feels comfortable.'),
-  TutorLine('S06', 'Stay with it for a few seconds.'),
-  TutorLine('S07', 'Let\'s try singing it again in 3...'),
-  TutorLine('S08', '2...'),
-  TutorLine('S09', '1...'),
-  TutorLine('S10', 'Beautiful. You can stop there.'),
-  TutorLine('S11', 'Now let\'s find a comfortable place for your voice.'),
-  TutorLine('S12', 'That\'s okay. Let\'s try once more.'),
-  TutorLine('S13', 'A soft, steady hum is enough.'),
-  TutorLine('S14', 'That\'s all right. I\'ll let you hear a sound first.'),
-  TutorLine('S15', 'Just listen.'),
-  TutorLine('S16', 'Now try that sound.'),
-  TutorLine('S17', 'We\'ll take this more gently.'),
-  TutorLine('S18', 'Let\'s listen once more.'),
-  TutorLine('S19', 'That\'s okay. Let\'s listen once more.'),
-  TutorLine('S20', 'Let\'s try a slightly lower sound.'),
-  TutorLine('S21', 'Let\'s try one in the middle.'),
-  TutorLine('S22', 'Now a slightly higher sound.'),
-  TutorLine('S23', 'Let\'s move a little higher.'),
-  TutorLine('S24', 'Let\'s move a little lower.'),
-  TutorLine('S25', 'Could you hear that sound clearly?'),
-  TutorLine('S26', 'That\'s lovely.'),
-  TutorLine('S27', 'That\'s okay. Let\'s try a little higher.'),
-  TutorLine('S28', 'Sorry, I didn\'t quite catch that.'),
-  TutorLine('S29', 'Yes or no is enough.'),
-  TutorLine('S30', 'How did that feel?'),
-  TutorLine('S31', 'That\'s all right. We\'ll keep this comfortable.'),
-  TutorLine('S32', 'You can say comfortable, or not comfortable.'),
-  TutorLine('S33', 'There\'s no hurry.'),
-  TutorLine(
-    'S34',
-    'That\'s okay. Let\'s practice it together so you can get familiar with the sound.',
-  ),
-  TutorLine('S35', 'Listen carefully, and sing along with me.'),
-  TutorLine('S36', 'Let\'s sing together in 3...'),
-  TutorLine(
-    'S37',
-    'That\'s okay. Let\'s practice that sound together once more.',
-  ),
-  TutorLine('S38', 'Now try that sound on your own.'),
-  TutorLine('S39', 'Wonderful. We found a comfortable Shruti for you.'),
-  TutorLine('S40', 'Your Shruti is C.'),
-  TutorLine('S41', 'Your Shruti is C sharp.'),
-  TutorLine('S42', 'Your Shruti is D.'),
-  TutorLine('S43', 'Your Shruti is D sharp.'),
-  TutorLine('S44', 'Your Shruti is E.'),
-  TutorLine('S45', 'Your Shruti is F.'),
-  TutorLine('S46', 'Your Shruti is F sharp.'),
-  TutorLine('S47', 'Your Shruti is G.'),
-  TutorLine('S48', 'Your Shruti is G sharp.'),
-  TutorLine('S49', 'Your Shruti is A.'),
-  TutorLine('S50', 'Your Shruti is A sharp.'),
-  TutorLine('S51', 'Your Shruti is B.'),
-  TutorLine('S52', 'We haven\'t found a comfortable Shruti just yet.'),
-  TutorLine('S53', 'We can try again whenever you like.'),
-  TutorLine('S54', 'First, I\'ll listen to your voice.'),
-  TutorLine('S55', 'Then, we\'ll explore a few sounds around it.'),
-  TutorLine('S56', 'You\'ll tell me how each one feels.'),
-  TutorLine(
-    'S57',
-    'We\'ll keep going until we find a comfortable place for your voice.',
-  ),
-  TutorLine(
-    'S58',
-    'There\'s no right or wrong answer. Just sing naturally and tell me how it feels.',
-  ),
-  TutorLine('S59', 'That\'s okay. Let\'s make this a little easier.'),
-  TutorLine(
-    'S60',
-    'That sound didn\'t feel quite right. Would you like to try a different one?',
-  ),
-  TutorLine('S61', 'Lovely. Let\'s try this one.'),
-  TutorLine(
-    'S62',
-    'That\'s perfectly okay. Let\'s stay with this one for now.',
-  ),
-  TutorLine(
-    'S63',
-    'Let\'s take a small step back and listen to your voice once more.',
-  ),
+/// Finalized tutor lines from [TutorDialogues] (single source of truth).
+///
+/// S69 was a sustained Sa demonstration and is no longer part of Stage 1.
+final List<TutorLine> tutorLines = [
+  for (final dialogue in TutorDialogues.all)
+    TutorLine(dialogue.id, dialogue.text),
 ];
 
 Future<void> main(List<String> args) async {
-  const overwriteFlags = {'--force', '--overwrite'};
-  if (args.any((arg) => !overwriteFlags.contains(arg))) {
+  final onlyIds = <String>{};
+  var overwrite = false;
+  for (final arg in args) {
+    if (arg == '--force' || arg == '--overwrite') {
+      overwrite = true;
+      continue;
+    }
+    if (arg.startsWith('--only=')) {
+      onlyIds.addAll(
+        arg
+            .substring('--only='.length)
+            .split(',')
+            .map((id) => id.trim())
+            .where((id) => id.isNotEmpty),
+      );
+      continue;
+    }
     stderr.writeln(
-      'Usage: dart run tools/generate_tutor_audio.dart [--force|--overwrite]',
+      'Usage: dart run tools/generate_tutor_audio.dart '
+      '[--force|--overwrite] [--only=S64,S65]',
     );
     exitCode = 64;
     return;
@@ -165,15 +103,25 @@ Future<void> main(List<String> args) async {
     return;
   }
 
-  final overwrite = args.isNotEmpty;
+  final selected = onlyIds.isEmpty
+      ? tutorLines
+      : tutorLines.where((line) => onlyIds.contains(line.id)).toList();
+  if (onlyIds.isNotEmpty && selected.length != onlyIds.length) {
+    final found = selected.map((line) => line.id).toSet();
+    final missing = onlyIds.where((id) => !found.contains(id)).join(', ');
+    stderr.writeln('Unknown tutor line id(s): $missing');
+    exitCode = 64;
+    return;
+  }
+
   final outputDirectory = Directory('${root.path}/$_outputDirectory');
   final generated = <String>[];
   final skipped = <String>[];
   final failed = <String>[];
-  final total = tutorLines.length;
+  final total = selected.length;
 
-  for (var index = 0; index < tutorLines.length; index++) {
-    final line = tutorLines[index];
+  for (var index = 0; index < selected.length; index++) {
+    final line = selected[index];
     final progress = '[${index + 1}/$total]';
     final output = File('${outputDirectory.path}/${line.id}.mp3');
 

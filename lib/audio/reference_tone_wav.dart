@@ -17,7 +17,10 @@ class ReferenceToneMix {
   static const fourth = 0.035;
 
   /// Headroom so the partials sum without clipping or a loudness jump.
-  static const peakScale = 0.88;
+  ///
+  /// Worst-case aligned peak is `(0.72+0.22+0.09+0.035)*peakScale ≈ 0.85`,
+  /// safely below full-scale so PCM encoding never saturates.
+  static const peakScale = 0.80;
 }
 
 /// Builds a short mono WAV for a Stage 2 pitch reference.
@@ -69,9 +72,9 @@ Uint8List buildReferenceToneWav({
 
     var envelope = 1.0;
     if (i < attackSamples) {
-      envelope = i / attackSamples;
+      envelope = _smoothstep(i / attackSamples);
     } else if (i >= totalSamples - releaseSamples) {
-      envelope = (totalSamples - 1 - i) / releaseSamples;
+      envelope = _smoothstep((totalSamples - 1 - i) / releaseSamples);
     }
     sample *= envelope * peakScale;
 
@@ -79,6 +82,56 @@ Uint8List buildReferenceToneWav({
   }
 
   return _wrapPcm16MonoWav(pcm, sampleRate);
+}
+
+/// Builds a mono WAV designed for seamless native looping at [frequencyHz].
+///
+/// Uses the same warm harmonic mix as [buildReferenceToneWav], but:
+/// - length is an integer number of fundamental periods (phase-continuous)
+/// - sustain envelope is constant (no end fade that would click on loop)
+///
+/// Intended for Stage 1 "Listen to an example" continuous playback.
+Uint8List buildLoopableReferenceToneWav({
+  required double frequencyHz,
+  Duration approximateDuration = const Duration(milliseconds: 1500),
+  int sampleRate = 44100,
+}) {
+  assert(frequencyHz > 0 && frequencyHz.isFinite);
+  assert(sampleRate > 0);
+  assert(approximateDuration > Duration.zero);
+
+  final targetSeconds =
+      approximateDuration.inMicroseconds / Duration.microsecondsPerSecond;
+  final cycles = math.max(1, (frequencyHz * targetSeconds).round());
+  final samplesPerCycle = sampleRate / frequencyHz;
+  final totalSamples = math.max(1, (cycles * samplesPerCycle).round());
+
+  final pcm = Int16List(totalSamples);
+  final twoPi = 2 * math.pi;
+  const fundamentalAmp = ReferenceToneMix.fundamental;
+  const secondHarmonicAmp = ReferenceToneMix.second;
+  const thirdHarmonicAmp = ReferenceToneMix.third;
+  const fourthHarmonicAmp = ReferenceToneMix.fourth;
+  const peakScale = ReferenceToneMix.peakScale;
+
+  for (var i = 0; i < totalSamples; i++) {
+    // Phase advances by exactly `cycles` turns over the buffer.
+    final phase = twoPi * cycles * (i / totalSamples);
+    final sample =
+        (fundamentalAmp * math.sin(phase) +
+            secondHarmonicAmp * math.sin(2 * phase) +
+            thirdHarmonicAmp * math.sin(3 * phase) +
+            fourthHarmonicAmp * math.sin(4 * phase)) *
+        peakScale;
+    pcm[i] = (sample.clamp(-1.0, 1.0) * 32767).round();
+  }
+
+  return _wrapPcm16MonoWav(pcm, sampleRate);
+}
+
+double _smoothstep(double x) {
+  final t = x.clamp(0.0, 1.0);
+  return t * t * (3 - 2 * t);
 }
 
 /// Parsed RIFF/WAV header fields for diagnostic logging and tests.

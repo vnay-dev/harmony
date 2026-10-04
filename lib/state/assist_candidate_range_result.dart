@@ -18,6 +18,9 @@ class AssistCandidateRangeResult {
   /// Whether Pa was stably matched.
   bool paMatched = false;
 
+  /// User reported Pa felt comfortable (`null` until answered).
+  bool? paComfortable;
+
   /// Whether Upper Sa was stably matched.
   bool upperSaMatched = false;
 

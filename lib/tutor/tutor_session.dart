@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/tutor/assist_tutor_hooks.dart';
 import 'package:harmony/tutor/tutor_answer.dart';
+import 'package:harmony/tutor/tutor_sa_sample_player.dart';
+import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_speech_recognizer.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
@@ -25,12 +27,16 @@ class TutorSession extends ChangeNotifier {
     TutorAnswerParser answerParser = const TutorAnswerParser(),
     TutorTimingConfig timing = const TutorTimingConfig(),
     Future<void> Function(Duration duration)? wait,
+    TutorSaSamplePlayer? saSamplePlayer,
     this.maxStage1AutoRetries = 5,
   }) : _engine = engine,
        _answerParser = answerParser,
        _speech = speechRecognizer ?? SilentTutorSpeechRecognizer(),
        _voice = TutorVoiceCoordinator(voice: voice, timing: timing, wait: wait),
+       _saSample = saSamplePlayer ?? TutorSaSamplePlayer(),
        _timing = timing {
+    _voice.onChanged = _onVoiceChanged;
+    _saSample.onChanged = _onSaSampleChanged;
     _engine.tutorHooks = AssistTutorHooks(
       beforeReference: _onBeforeReference,
       afterReference: _onAfterReference,
@@ -42,6 +48,7 @@ class TutorSession extends ChangeNotifier {
       onAssistedReferenceWillStart: _onAssistedReferenceWillStart,
       afterAssistedSinging: _onAfterAssistedSinging,
       afterAssistedPracticeUnconfirmed: _onAssistedPracticeUnconfirmed,
+      beforeCompletionPlayback: _onBeforeCompletionPlayback,
     );
     _engine.addListener(_onEngineChanged);
     _syncStepFromEngine();
@@ -52,8 +59,9 @@ class TutorSession extends ChangeNotifier {
   final TutorSpeechRecognizer _speech;
   final TutorAnswerParser _answerParser;
   final TutorTimingConfig _timing;
+  final TutorSaSamplePlayer _saSample;
 
-  /// After this many auto Stage 1 retries, wait for an explicit Try again tap.
+  /// Retained for API compatibility. Stage 1 retries are always explicit taps.
   final int maxStage1AutoRetries;
 
   TutorStep _step = TutorStep.welcome;
@@ -71,6 +79,29 @@ class TutorSession extends ChangeNotifier {
   int _unclearAnswerCount = 0;
   bool _questionOpen = false;
   bool _differentSoundChoiceReady = false;
+  TutorPrimaryAction _primaryAction = TutorPrimaryAction.none;
+  Completer<void>? _primaryActionCompleter;
+  bool _showStage1SuccessMark = false;
+
+  /// After a Stage 1 miss, offer Hear Sa + shuffle under the recovery lines.
+  bool _stage1ExampleControls = false;
+
+  /// After S61 finishes speaking: same S61 text uses instruction (grey) style.
+  bool _stage1RecoveryInstruction = false;
+
+  /// True once the user commits to singing until Stage 1 listen ends.
+  ///
+  /// Prevents a stale pre-listen transcript frame while the engine transitions
+  /// into [AssistUiPhase.listening].
+  bool _stage1AwaitingUserTurn = false;
+
+  /// Holds the "Listen to this sound…" prompt from reference start until
+  /// countdown (Stage 2) or solo listen (Stage 1) takes over — blocks stale
+  /// pre-reference transcript such as S74.
+  bool _holdReferenceListenPrompt = false;
+
+  TutorExampleControlPhase _examplePhase = TutorExampleControlPhase.idle;
+  int _exampleShuffleGeneration = 0;
 
   /// Bumped on Stop and on each fresh start so late callbacks cannot continue.
   int _sessionToken = 0;
@@ -87,6 +118,9 @@ class TutorSession extends ChangeNotifier {
 
   String? get lastVoiceLine => _voice.lastLine;
 
+  /// Dialogue currently driving transcript + audio (null when unmapped/silent).
+  TutorDialogue? get activeDialogue => _voice.activeDialogue;
+
   List<String> get spokenLog => _voice.spokenLog;
 
   /// Countdown values spoken in the current countdown run (tests).
@@ -95,6 +129,9 @@ class TutorSession extends ChangeNotifier {
   int? get countdownValue => _engine.countdownValue;
 
   TutorTeachingLevel get teachingLevel => _engine.teachingLevel;
+
+  /// How many Stage 1 "Let's try again" taps have been used this session.
+  int get stage1RetryCount => _stage1AutoRetryCount;
 
   double get progress {
     switch (_step) {
@@ -110,6 +147,7 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.askLowerAudibility:
         return 0.45;
       case TutorStep.testMiddle:
+      case TutorStep.askMiddleComfort:
         return 0.6;
       case TutorStep.testUpper:
       case TutorStep.askUpperComfort:
@@ -132,15 +170,14 @@ class TutorSession extends ChangeNotifier {
   /// Quiet heading above the journey indicator.
   static const journeyHeading = 'Finding your Shruti';
 
-  /// True after orientation begins, until the session is stopped.
-  bool get showJourneyProgress => journeyStage != null;
+  /// Journey checklist is retired from the tutor surface (calm circle + dialogue).
+  bool get showJourneyProgress => false;
 
-  /// Visible journey place. Null during welcome and after Stop.
+  /// Visible journey place. Null during Stage 1 and after Stop.
   TutorJourneyStage? get journeyStage {
     if (_step == TutorStep.welcome || _step == TutorStep.stopped) {
       return null;
     }
-
     final phase = _engine.uiPhase;
     if (_step == TutorStep.complete ||
         _step == TutorStep.unresolved ||
@@ -152,7 +189,205 @@ class TutorSession extends ChangeNotifier {
     if (_engine.isExploringRange) {
       return TutorJourneyStage.exploreRange;
     }
-    return TutorJourneyStage.listenToVoice;
+    return null;
+  }
+
+  /// Bottom CTA waiting for an explicit Stage 1 tap.
+  TutorPrimaryAction get primaryAction => _primaryAction;
+
+  bool get showPrimaryAction => _primaryAction != TutorPrimaryAction.none;
+
+  /// Secondary "Listen to an example" control under the Stage 1 instruction.
+  bool get showHearSa =>
+      _primaryAction == TutorPrimaryAction.imReadyToListen ||
+      (_stage1ExampleControls &&
+          _primaryAction == TutorPrimaryAction.letsTryAgain);
+
+  /// Tertiary shuffle prompt under the example button (failure recovery only).
+  bool get showShuffleExample =>
+      _stage1ExampleControls &&
+      _primaryAction == TutorPrimaryAction.letsTryAgain;
+
+  /// True while the optional Stage 1 Sa sample is audible.
+  bool get isHearSaPlaying => _saSample.isPlaying;
+
+  /// Idle / loading / loaded visual phase for the example button.
+  TutorExampleControlPhase get exampleControlPhase => _examplePhase;
+
+  /// Whether the tertiary shuffle action can start a new prepare cycle.
+  ///
+  /// Allowed while an example is playing — shuffle stops it, then loads.
+  bool get canShuffleExample =>
+      showShuffleExample && _examplePhase == TutorExampleControlPhase.idle;
+
+  /// True when [dialogueText] is a non-spoken UI hint (lighter style).
+  bool get isDialogueInstruction {
+    if (isSpeaking) {
+      return false;
+    }
+    return _stage1RecoveryInstruction ||
+        _stage1AwaitingUserTurn ||
+        _engine.uiPhase == AssistUiPhase.listening ||
+        _engine.uiPhase == AssistUiPhase.assistedSinging ||
+        _showsReferenceListenPrompt;
+  }
+
+  /// Reference-listen instruction while the hold is active.
+  ///
+  /// Covers playback, settle ([AssistUiPhase.preparingToListen]), and the
+  /// gap until countdown / Stage 1 speech binds a replacement transcript.
+  /// While hold is set and no spoken line is bound yet, keep the listen prompt
+  /// — even if [isSpeaking] has flipped true during audio spin-up.
+  bool get _showsReferenceListenPrompt {
+    if (!_holdReferenceListenPrompt) {
+      return false;
+    }
+    if (isSpeaking) {
+      final bound = activeDialogue?.text ?? lastVoiceLine;
+      if (bound != null && bound.trim().isNotEmpty) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  String? get primaryActionLabel {
+    switch (_primaryAction) {
+      case TutorPrimaryAction.letsBegin:
+        return TutorScripts.ctaLetsBegin;
+      case TutorPrimaryAction.imReadyToListen:
+        return TutorScripts.ctaImReadyToSingSa;
+      case TutorPrimaryAction.imReadyForNextStep:
+        return TutorScripts.ctaImReady;
+      case TutorPrimaryAction.letsTryAgain:
+        return TutorScripts.ctaLetsTryAgain;
+      case TutorPrimaryAction.playTheSound:
+        return TutorScripts.ctaPlayTheSound;
+      case TutorPrimaryAction.none:
+        return null;
+    }
+  }
+
+  /// Stage 1 capture success — drives the presence circle success state.
+  bool get showStage1SuccessMark => _showStage1SuccessMark;
+
+  /// Visual state for the persistent tutor circle.
+  TutorPresenceState get presenceState {
+    if (isSpeaking) {
+      return TutorPresenceState.speaking;
+    }
+    if (_showStage1SuccessMark) {
+      return TutorPresenceState.success;
+    }
+    if (_step == TutorStep.complete) {
+      return TutorPresenceState.success;
+    }
+    if (_engine.uiPhase == AssistUiPhase.listening) {
+      return TutorPresenceState.listening;
+    }
+    return TutorPresenceState.idle;
+  }
+
+  /// Large dialogue / instruction text for the tutor screen.
+  ///
+  /// While Harmony is speaking, this is always the active dialogue text — never
+  /// a step/phase fallback. After speech, mirrors the last spoken line unless a
+  /// listen prompt must replace it (Stage 1 or Stage 2 solo turn).
+  String? get dialogueText {
+    if (_step == TutorStep.stopped) {
+      return TutorScripts.sessionStopped;
+    }
+    // Hold listen prompt until a replacement spoken line is bound. Checked
+    // before the generic speaking branch so audio spin-up cannot expose a
+    // stale transcript such as "1..." between reference and countdown.
+    if (_holdReferenceListenPrompt) {
+      if (isSpeaking) {
+        final bound = activeDialogue?.text ?? lastVoiceLine;
+        if (bound != null && bound.trim().isNotEmpty) {
+          return bound;
+        }
+      }
+      return TutorScripts.referenceListenPrompt;
+    }
+    // Authoritative while speaking: same object that selected the audio clip.
+    if (isSpeaking) {
+      final active = activeDialogue?.text ?? lastVoiceLine;
+      if (active != null && active.trim().isNotEmpty) {
+        return active;
+      }
+    }
+    if (_step == TutorStep.complete) {
+      final line = activeDialogue?.text ?? lastVoiceLine;
+      // Only keep a real completion transcript — never a leftover question line.
+      if (line != null &&
+          line.trim().isNotEmpty &&
+          line.startsWith(TutorDialogues.s39.text)) {
+        return line;
+      }
+      return TutorScripts.completion(_engine.referencePitch.label);
+    }
+    if (_step == TutorStep.unresolved) {
+      final line = activeDialogue?.text ?? lastVoiceLine;
+      if (line != null && line.trim().isNotEmpty) {
+        return line;
+      }
+      return TutorScripts.unresolved.first;
+    }
+    // While waiting for "Play the sound", keep S74 on screen (not the singing hint).
+    if (_primaryAction == TutorPrimaryAction.playTheSound) {
+      final line = activeDialogue?.text ?? lastVoiceLine;
+      if (line != null && line.trim().isNotEmpty) {
+        return line;
+      }
+    }
+    // Countdown must only show real countdown lines — never a stale fragment.
+    if (_engine.uiPhase == AssistUiPhase.countdown) {
+      final line = activeDialogue?.text ?? lastVoiceLine;
+      if (line != null && TutorScripts.isCountdownLine(line)) {
+        return line;
+      }
+      return null;
+    }
+    // Assisted sing-along owns its instruction — never inherit "1..." from the
+    // countdown that just finished.
+    if (_engine.uiPhase == AssistUiPhase.assistedSinging) {
+      if (isSpeaking) {
+        final active = activeDialogue?.text ?? lastVoiceLine;
+        if (active != null &&
+            active.trim().isNotEmpty &&
+            !TutorScripts.isCountdownLine(active)) {
+          return active;
+        }
+      }
+      return TutorScripts.assistedSingAlongPrompt;
+    }
+    if (_stage1AwaitingUserTurn) {
+      return TutorScripts.stage1ListenPrompt;
+    }
+    if (_engine.uiPhase == AssistUiPhase.listening) {
+      return TutorScripts.stage1ListenPrompt;
+    }
+    // Same transcript as the last spoken dialogue (S61 after failure recovery).
+    // [_stage1RecoveryInstruction] only changes style via [isDialogueInstruction].
+    final line = activeDialogue?.text ?? lastVoiceLine;
+    if (line != null && line.trim().isNotEmpty) {
+      return line;
+    }
+    if (_step == TutorStep.startingNoteCaptured) {
+      return TutorScripts.stage1Success;
+    }
+    // Question steps mirror their spoken scripts when speech has not left a line.
+    switch (_step) {
+      case TutorStep.askLowerAudibility:
+        return TutorScripts.lowerAudibilityQuestion;
+      case TutorStep.askMiddleComfort:
+      case TutorStep.askUpperComfort:
+        return TutorScripts.upperComfortQuestion;
+      case TutorStep.offerDifferentSound:
+        return TutorScripts.offerDifferentSound;
+      default:
+        return null;
+    }
   }
 
   static String journeyLabel(TutorJourneyStage stage) {
@@ -180,28 +415,45 @@ class TutorSession extends ChangeNotifier {
   /// Primary on-screen action cue. During countdown, only the countdown
   /// display shows the digit — headline stays a calm label.
   String get headline {
+    // While speaking, mirror the active dialogue — except terminal steps whose
+    // legacy surface uses fixed celebration / stopped labels.
+    if (isSpeaking &&
+        _step != TutorStep.complete &&
+        _step != TutorStep.unresolved &&
+        _step != TutorStep.stopped) {
+      final spoken = activeDialogue?.text ?? lastVoiceLine;
+      if (spoken != null && spoken.trim().isNotEmpty) {
+        return spoken;
+      }
+    }
+    final dialogue = dialogueText;
+    if (dialogue != null &&
+        (_step == TutorStep.welcome ||
+            _step == TutorStep.discoverStartingNote ||
+            _step == TutorStep.startingNoteCaptured ||
+            _step == TutorStep.startingNoteFailure ||
+            !_engine.isExploringRange)) {
+      return dialogue;
+    }
     switch (_step) {
       case TutorStep.welcome:
       case TutorStep.orientation:
-        return 'Find your comfortable Shruti';
+        return TutorScripts.welcome.first;
       case TutorStep.discoverStartingNote:
         if (_engine.uiPhase == AssistUiPhase.refreshingStartingNote) {
           return TutorScripts.stepBackToVoice;
         }
-        if (_engine.uiPhase == AssistUiPhase.countdown) {
-          return 'Your turn';
-        }
         if (_engine.uiPhase == AssistUiPhase.listening) {
-          return 'Your turn';
+          return TutorScripts.stage1ListenPrompt;
         }
         if (_engine.uiPhase == AssistUiPhase.playingReference) {
           return 'Listen';
         }
-        return 'Sing one comfortable sound';
+        return TutorScripts.firstStepInstruction;
       case TutorStep.startingNoteFailure:
-        return "Let's try once more";
+        return TutorScripts.startingNoteRetryOnce.first;
       case TutorStep.startingNoteCaptured:
-        return 'Lovely — I heard that';
+        return TutorScripts.stage1Success;
       case TutorStep.testLower:
       case TutorStep.testMiddle:
       case TutorStep.testUpper:
@@ -210,7 +462,8 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.offerDifferentSound:
         return TutorScripts.offerDifferentSound;
       case TutorStep.askLowerAudibility:
-        return 'Could you hear that sound clearly?';
+        return TutorScripts.lowerAudibilityQuestion;
+      case TutorStep.askMiddleComfort:
       case TutorStep.askUpperComfort:
         return 'How did that feel?';
       case TutorStep.complete:
@@ -223,24 +476,21 @@ class TutorSession extends ChangeNotifier {
   }
 
   String? get supportText {
+    // Listening screen stays focused — no secondary coaching under the prompt.
+    if (_showsReferenceListenPrompt) {
+      return null;
+    }
     switch (_step) {
       case TutorStep.welcome:
       case TutorStep.orientation:
-        return "I'll guide you. You just sing.";
       case TutorStep.discoverStartingNote:
-        if (_engine.uiPhase == AssistUiPhase.listening) {
-          return 'Keep the same sound going.';
-        }
-        if (_engine.uiPhase == AssistUiPhase.countdown) {
-          return null;
-        }
-        return null;
       case TutorStep.startingNoteCaptured:
-        return "Now I'll find a comfortable range for you.";
+        return null;
       case TutorStep.askLowerAudibility:
         return _listeningForSpeechAnswer
             ? 'Say yes or no — or tap below.'
             : 'Say yes or no — or tap below.';
+      case TutorStep.askMiddleComfort:
       case TutorStep.askUpperComfort:
         return 'Say comfortable or not comfortable — or tap below.';
       case TutorStep.complete:
@@ -256,18 +506,25 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.testMiddle:
       case TutorStep.testUpper:
       case TutorStep.exploreNextShruti:
-        return _rangeSupportText();
+        return _engine.isExploringRange ? _rangeSupportText() : null;
     }
   }
 
   bool get showCountdown =>
+      _engine.isExploringRange &&
       _engine.uiPhase == AssistUiPhase.countdown &&
       _engine.countdownValue != null;
 
-  bool get showListenProgress =>
-      _engine.uiPhase == AssistUiPhase.listening && !_engine.isExploringRange;
+  /// Stage 1 never shows a listen timer or progress ring.
+  bool get showListenProgress => false;
 
-  bool get showYesNoFallback => _step == TutorStep.askLowerAudibility;
+  /// Audibility CTAs — only while the question is still open for an answer.
+  ///
+  /// Cleared by [_claimQuestion] as soon as a tap/spoken answer is accepted so
+  /// acknowledgement speech ("That's lovely.") never briefly re-shows the
+  /// previous Yes/No buttons after [isSpeaking] flips false during its pause.
+  bool get showYesNoFallback =>
+      _step == TutorStep.askLowerAudibility && _questionOpen;
 
   /// Yes / No for trying a nearby sound. Separate from Lower Sa audibility.
   bool get showDifferentSoundChoice =>
@@ -276,37 +533,35 @@ class TutorSession extends ChangeNotifier {
 
   /// True once the recovery question has been offered and can still be answered.
   ///
-  /// Stays false while S59/S60 are speaking, and while a tap is already in
-  /// progress, so the choice cannot fire twice or wait on a dead audio future.
+  /// Stays false while Stage 2 recovery speech is playing, and while a tap is
+  /// already in progress, so the choice cannot fire twice or wait on a dead
+  /// audio future.
   bool get canAnswerDifferentSound =>
       _differentSoundChoiceReady && _questionOpen && showDifferentSoundChoice;
 
-  bool get showComfortFallback => _step == TutorStep.askUpperComfort;
+  /// Comfort CTAs — only while the question is still open for an answer.
+  ///
+  /// Same lifecycle as [showYesNoFallback]: hide immediately on claim so the
+  /// acknowledgement / "keep this comfortable" lines never inherit prior CTAs.
+  bool get showComfortFallback =>
+      (_step == TutorStep.askMiddleComfort ||
+          _step == TutorStep.askUpperComfort) &&
+      _questionOpen;
 
   bool get showPlayMyShruti => _step == TutorStep.complete;
 
-  bool get showTryAgain =>
-      _step == TutorStep.unresolved ||
-      (_step == TutorStep.startingNoteFailure &&
-          _stage1AutoRetryCount >= maxStage1AutoRetries);
+  bool get showTryAgain => _step == TutorStep.unresolved;
 
   /// Explicit end state after the user taps Stop.
   bool get showSessionStopped => _step == TutorStep.stopped;
 
-  bool get showStop {
-    if (_step == TutorStep.complete || _step == TutorStep.stopped) {
-      return false;
-    }
-    if (_stopRequested && _engine.uiPhase == AssistUiPhase.intro) {
-      return false;
-    }
-    if (_step == TutorStep.welcome &&
-        !_welcomeStarted &&
-        !_engine.isSessionActive) {
-      return false;
-    }
-    return true;
-  }
+  /// Bottom Stop was replaced by the top-right Home control.
+  ///
+  /// Cancellation still runs through [stop]; the screen invokes it from Home.
+  bool get showStop => false;
+
+  /// Top-right Home is available throughout Tutor Mode.
+  bool get showHome => true;
 
   String? get confirmedShrutiLabel =>
       _step == TutorStep.complete ? _engine.referencePitch.label : null;
@@ -324,25 +579,192 @@ class TutorSession extends ChangeNotifier {
     if (!_isLive(token)) {
       return;
     }
-    _setStep(TutorStep.orientation);
+    await _awaitPrimaryAction(token, TutorPrimaryAction.letsBegin);
+    if (!_isLive(token)) {
+      return;
+    }
+    await _runFirstStep(token);
+  }
+
+  Future<void> _runFirstStep(int token) async {
+    _setStep(TutorStep.discoverStartingNote);
     notifyListeners();
-    await _voice.speakAll(
-      TutorScripts.orientation,
-      eventIdPrefix: 'orientation',
+    await _voice.speakOnce('first-step-listen', TutorScripts.firstStepListen);
+    if (!_isLive(token)) {
+      return;
+    }
+    await _voice.speakOnce(
+      'first-step-instruction',
+      TutorScripts.firstStepInstruction,
+      pauseAfter: _timing.shortTransitionPause,
     );
     if (!_isLive(token)) {
       return;
     }
-    _setStep(TutorStep.discoverStartingNote);
-    notifyListeners();
-    await _voice.speakAll(
-      TutorScripts.discoverIntro,
-      eventIdPrefix: 'discover',
-    );
+    await _awaitPrimaryAction(token, TutorPrimaryAction.imReadyToListen);
     if (!_isLive(token) || _engine.isSessionActive) {
       return;
     }
     await _engine.startSession();
+  }
+
+  void _onVoiceChanged() {
+    if (!_isDisposed) {
+      notifyListeners();
+    }
+  }
+
+  void _onSaSampleChanged() {
+    if (!_isDisposed) {
+      notifyListeners();
+    }
+  }
+
+  /// Plays or pauses the optional Stage 1 Sa sample.
+  Future<void> toggleHearSa() async {
+    if (_isDisposed ||
+        !showHearSa ||
+        _examplePhase != TutorExampleControlPhase.idle) {
+      return;
+    }
+    await _saSample.toggle();
+  }
+
+  /// Prepares a different synthesized example without auto-playing it.
+  ///
+  /// Does not speak, clear, or replay tutor dialogue. Only the example button
+  /// phase changes while the surrounding layout stays stable.
+  Future<void> shuffleExampleSound() async {
+    if (_isDisposed || !canShuffleExample) {
+      return;
+    }
+    final token = _sessionToken;
+    final generation = ++_exampleShuffleGeneration;
+    await _stopHearSa();
+    if (!_isLive(token) || generation != _exampleShuffleGeneration) {
+      return;
+    }
+    _examplePhase = TutorExampleControlPhase.loading;
+    notifyListeners();
+    try {
+      await _saSample.prepareNextPitch();
+    } catch (_) {
+      if (!_isLive(token) || generation != _exampleShuffleGeneration) {
+        return;
+      }
+      _examplePhase = TutorExampleControlPhase.idle;
+      notifyListeners();
+      return;
+    }
+    if (!_isLive(token) || generation != _exampleShuffleGeneration) {
+      return;
+    }
+    _examplePhase = TutorExampleControlPhase.loaded;
+    notifyListeners();
+    // Quiet wait — must not set isSpeaking or the transcript will flash.
+    await _voice.waitQuietly(_timing.exampleReadyAffirmationDuration);
+    if (!_isLive(token) || generation != _exampleShuffleGeneration) {
+      return;
+    }
+    _examplePhase = TutorExampleControlPhase.idle;
+    notifyListeners();
+  }
+
+  Future<void> _stopHearSa() async {
+    await _saSample.stop();
+  }
+
+  void _resetExampleControlPhase() {
+    _exampleShuffleGeneration += 1;
+    _examplePhase = TutorExampleControlPhase.idle;
+  }
+
+  void _beginStage1UserTurn() {
+    _stage1AwaitingUserTurn = true;
+    _stage1ExampleControls = false;
+    _stage1RecoveryInstruction = false;
+    // Silent clear — caller notifies once. Emitting here would re-enter
+    // auto-continue listeners while the primary-action completer is still open.
+    _voice.clearLastLine(notify: false);
+  }
+
+  void _endStage1UserTurn() {
+    _stage1AwaitingUserTurn = false;
+  }
+
+  /// Completes the current tutor CTA wait.
+  Future<void> continuePrimaryAction() async {
+    final pending = _primaryActionCompleter;
+    if (pending == null || pending.isCompleted) {
+      return;
+    }
+    final action = _primaryAction;
+    await _stopHearSa();
+    if (_isDisposed || pending.isCompleted) {
+      return;
+    }
+    _resetExampleControlPhase();
+    // Clear the CTA before any transcript updates so auto-continue listeners
+    // cannot invoke this method again for the same completer.
+    _primaryAction = TutorPrimaryAction.none;
+    if (action == TutorPrimaryAction.imReadyToListen) {
+      // Enter listening UI immediately — never flash the previous dialogue.
+      _beginStage1UserTurn();
+    } else if (action == TutorPrimaryAction.letsTryAgain) {
+      _stage1ExampleControls = false;
+      _stage1RecoveryInstruction = false;
+      if (_engine.stage1GuidedDemoPending) {
+        // Guided demo runs next — stay on recovery dialogue until S74 / CTA.
+        _endStage1UserTurn();
+      } else {
+        // Enter listening UI immediately — never flash the previous dialogue.
+        _beginStage1UserTurn();
+      }
+    }
+    if (action == TutorPrimaryAction.playTheSound) {
+      // Enter the dedicated listen UI immediately — never flash S74 again.
+      _endStage1UserTurn();
+      _holdReferenceListenPrompt = true;
+      _voice.clearLastLine(notify: false);
+    }
+    notifyListeners();
+    if (!pending.isCompleted) {
+      pending.complete();
+    }
+  }
+
+  Future<void> _awaitPrimaryAction(
+    int token,
+    TutorPrimaryAction action, {
+    bool quietTransition = false,
+  }) async {
+    if (!_isLive(token) || action == TutorPrimaryAction.none) {
+      return;
+    }
+    if (!quietTransition) {
+      await _voice.pause(_timing.shortTransitionPause);
+      if (!_isLive(token)) {
+        return;
+      }
+    }
+    // quietTransition: skip speaking pause so completed S61 stays grey.
+    final completer = Completer<void>();
+    _primaryActionCompleter = completer;
+    _primaryAction = action;
+    notifyListeners();
+    await completer.future;
+    if (identical(_primaryActionCompleter, completer)) {
+      _primaryActionCompleter = null;
+    }
+  }
+
+  void _clearPrimaryAction({bool complete = true}) {
+    final pending = _primaryActionCompleter;
+    _primaryAction = TutorPrimaryAction.none;
+    _primaryActionCompleter = null;
+    if (complete && pending != null && !pending.isCompleted) {
+      pending.complete();
+    }
   }
 
   Future<void> stop() async {
@@ -354,9 +776,17 @@ class TutorSession extends ChangeNotifier {
     _listeningForSpeechAnswer = false;
     _differentSoundChoiceReady = false;
     _questionOpen = false;
+    _showStage1SuccessMark = false;
+    _stage1ExampleControls = false;
+    _stage1RecoveryInstruction = false;
+    _endStage1UserTurn();
+    _holdReferenceListenPrompt = false;
+    _resetExampleControlPhase();
+    _clearPrimaryAction();
     _setStep(TutorStep.stopped);
     _engine.cancelActiveWork();
     _voice.cancelSpeech();
+    unawaited(_stopHearSa());
     notifyListeners();
     unawaited(_speech.stop());
     final tail = _engine.stopSession();
@@ -383,8 +813,16 @@ class TutorSession extends ChangeNotifier {
     _lastHandledStage1FailureCount = 0;
     _unclearAnswerCount = 0;
     _countdownEmitted.clear();
+    _showStage1SuccessMark = false;
+    _stage1ExampleControls = false;
+    _stage1RecoveryInstruction = false;
+    _endStage1UserTurn();
+    _holdReferenceListenPrompt = false;
+    _resetExampleControlPhase();
+    _clearPrimaryAction();
     _voice.cancelSpeech();
     _voice.resetEventKeys();
+    unawaited(_stopHearSa());
     await _engine.tryAgain();
   }
 
@@ -407,8 +845,15 @@ class TutorSession extends ChangeNotifier {
     _listeningForSpeechAnswer = false;
     _differentSoundChoiceReady = false;
     _questionOpen = false;
+    _showStage1SuccessMark = false;
+    _stage1ExampleControls = false;
+    _stage1RecoveryInstruction = false;
+    _endStage1UserTurn();
+    _resetExampleControlPhase();
+    _clearPrimaryAction();
     _voice.cancelSpeech();
     _voice.resetEventKeys();
+    unawaited(_stopHearSa());
     _setStep(TutorStep.welcome);
     notifyListeners();
     await _runWelcome(token);
@@ -440,19 +885,35 @@ class TutorSession extends ChangeNotifier {
   }
 
   Future<void> answerUpperComfort(bool comfortable) async {
-    if (_engine.uiPhase != AssistUiPhase.awaitingUpperComfort ||
-        !_claimQuestion()) {
+    final phase = _engine.uiPhase;
+    final isPa = phase == AssistUiPhase.awaitingPaComfort;
+    final isUpper = phase == AssistUiPhase.awaitingUpperComfort;
+    if ((!isPa && !isUpper) || !_claimQuestion()) {
       return;
     }
     _listeningForSpeechAnswer = false;
     notifyListeners();
     unawaited(_speech.stop());
     if (comfortable) {
-      await _voice.speakOnce('upper-yes-ack', TutorScripts.softAffirmation);
-      await _engine.reportUpperSaComfortable();
+      await _voice.speakOnce(
+        isPa ? 'pa-yes-ack' : 'upper-yes-ack',
+        TutorScripts.softAffirmation,
+      );
+      if (isPa) {
+        await _engine.reportPaComfortable();
+      } else {
+        await _engine.reportUpperSaComfortable();
+      }
     } else {
-      await _voice.speakOnce('upper-no-ack', TutorScripts.upperNotComfortable);
-      await _engine.reportUpperSaStrained();
+      await _voice.speakOnce(
+        isPa ? 'pa-no-ack' : 'upper-no-ack',
+        TutorScripts.upperNotComfortable,
+      );
+      if (isPa) {
+        await _engine.reportPaStrained();
+      } else {
+        await _engine.reportUpperSaStrained();
+      }
     }
   }
 
@@ -467,31 +928,30 @@ class TutorSession extends ChangeNotifier {
     _listeningForSpeechAnswer = false;
     notifyListeners();
     unawaited(_speech.stop());
-    await _speakRecoveryLine(
-      tryDifferentSound
-          ? 'different-sound-yes-${_engine.currentRound}-'
-                '${_engine.currentExploreCandidate?.label}'
-          : 'different-sound-no-${_engine.currentRound}-'
-                '${_engine.currentExploreCandidate?.label}',
-      tryDifferentSound
-          ? TutorScripts.tryThisSound
-          : TutorScripts.stayWithThisSound,
-    );
-    if (!_isLive(token) ||
-        _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
+    if (!tryDifferentSound) {
+      await _speakRecoveryDialogue(
+        'different-sound-no-${_engine.currentRound}-'
+        '${_engine.currentExploreCandidate?.label}',
+        TutorDialogues.s73,
+      );
+      if (!_isLive(token) ||
+          _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
+        return;
+      }
+      await _engine.declineDifferentSound();
       return;
     }
-    if (tryDifferentSound) {
-      await _engine.acceptDifferentSound();
-    } else {
-      await _engine.declineDifferentSound();
-    }
+    // Yes: no spoken acknowledgement — move straight to the nearby sound.
+    await _engine.acceptDifferentSound();
   }
 
-  /// Speaks a recovery line. A missing or failed clip must not trap the choice.
-  Future<void> _speakRecoveryLine(String eventId, String line) async {
+  /// Speaks a recovery [TutorDialogue] atomically (text + audio from one id).
+  Future<void> _speakRecoveryDialogue(
+    String eventId,
+    TutorDialogue dialogue,
+  ) async {
     try {
-      await _voice.speakOnce(eventId, line);
+      await _voice.speakDialogueOnce(eventId, dialogue);
     } catch (_) {}
   }
 
@@ -522,7 +982,8 @@ class TutorSession extends ChangeNotifier {
       return;
     }
 
-    if (_step == TutorStep.askUpperComfort) {
+    if (_step == TutorStep.askMiddleComfort ||
+        _step == TutorStep.askUpperComfort) {
       final answer = _answerParser.parseComfort(raw);
       switch (answer) {
         case TutorComfortAnswer.comfortable:
@@ -539,38 +1000,58 @@ class TutorSession extends ChangeNotifier {
 
   // --- Engine hooks (single path for speech around reference / countdown) ---
 
+  /// Speaks S74, waits for "Play the sound", then locks the listen prompt.
+  ///
+  /// Shared by Stage 1 guided demo and Stage 2 first Lower Sa reference.
+  Future<bool> _awaitPlaySoundConsent(int token, String eventId) async {
+    await _voice.speakOnce(eventId, TutorScripts.lowerSoundListenPrompt);
+    if (!_isLive(token)) {
+      return false;
+    }
+    await _awaitPrimaryAction(token, TutorPrimaryAction.playTheSound);
+    if (!_isLive(token)) {
+      return false;
+    }
+    _holdReferenceListenPrompt = true;
+    await _voice.beginReferenceAudio();
+    notifyListeners();
+    return true;
+  }
+
   Future<void> _onBeforeReference() async {
     final token = _sessionToken;
     if (!_isLive(token)) {
       return;
     }
-    // Speak while reference is inactive, then lock before the engine plays.
+    // Stage 1 guided demo: same consent + listen-screen pattern as Stage 2.
     if (!_engine.isExploringRange) {
-      await _voice.speakOnce(
+      _endStage1UserTurn();
+      _stage1ExampleControls = false;
+      _stage1RecoveryInstruction = false;
+      final ready = await _awaitPlaySoundConsent(
+        token,
         'stage1-demo-listen-${_engine.stage1FailureCount}',
-        TutorScripts.listenFirst,
-        pauseAfter: _timing.speechToReferencePause,
       );
-      if (!_isLive(token)) {
+      if (!ready) {
         return;
       }
-      await _voice.beginReferenceAudio();
-      notifyListeners();
       return;
     }
 
     _syncStepFromEngine();
     if (_engine.suppressNextRangeIntro) {
       _engine.consumeRangeIntroSuppression();
+      // Recovery path keeps a short listen cue; consent CTA is Stage 1 / first
+      // Lower Sa only (shared S74 flow above).
       await _voice.speakOnce(
         'ref-recovery-listen-${_engine.currentRound}-'
         '${_engine.currentExploreCandidate?.label}',
         TutorScripts.listenFirst,
-        pauseAfter: _timing.speechToReferencePause,
       );
       if (!_isLive(token)) {
         return;
       }
+      _holdReferenceListenPrompt = true;
       await _voice.beginReferenceAudio();
       notifyListeners();
       return;
@@ -579,6 +1060,10 @@ class TutorSession extends ChangeNotifier {
     final failure = _engine.rangePointFailureCount;
     final eventBase =
         'ref-${_engine.currentExploreCandidate?.label}-${point?.name}-$failure';
+    // First Lower Sa in initial search uses the longer listen prompt (S74).
+    // All other first-attempt range points keep the short "Just listen." line.
+    var listenPrompt = TutorScripts.listenFirst;
+    var usePlaySoundConsent = false;
 
     if (failure == 0) {
       switch (point) {
@@ -589,6 +1074,8 @@ class TutorSession extends ChangeNotifier {
               '$eventBase-intro',
               TutorScripts.lowerSoundIntro,
             );
+            listenPrompt = TutorScripts.lowerSoundListenPrompt;
+            usePlaySoundConsent = true;
           } else {
             _setStep(TutorStep.exploreNextShruti);
             await _voice.speakOnce(
@@ -613,39 +1100,35 @@ class TutorSession extends ChangeNotifier {
       }
     } else {
       await _speakStruggleLeadIn(eventBase);
-      await _voice.pause(_timing.speechToReferencePause);
     }
 
+    if (!_isLive(token)) {
+      return;
+    }
+    if (usePlaySoundConsent) {
+      await _awaitPlaySoundConsent(token, '$eventBase-listen-first');
+      return;
+    }
     if (failure == 0) {
-      await _voice.speakOnce(
-        '$eventBase-listen-first',
-        TutorScripts.listenFirst,
-        pauseAfter: _timing.speechToReferencePause,
-      );
+      // Finish spoken instruction fully before the listen screen. No pauseAfter
+      // — reference playback starts as soon as that screen appears.
+      await _voice.speakOnce('$eventBase-listen-first', listenPrompt);
     }
     if (!_isLive(token)) {
       return;
     }
+    _holdReferenceListenPrompt = true;
     await _voice.beginReferenceAudio();
     notifyListeners();
   }
 
   Future<void> _onAfterReference() async {
-    final token = _sessionToken;
     _voice.endReferenceAudio();
-    await _voice.pause(_timing.referenceToSpeechPause);
-    if (!_isLive(token)) {
-      return;
+    // Drop any leftover transcript (including a prior countdown "1...") so it
+    // cannot resurface after the listen prompt yields to countdown / singing.
+    if (_holdReferenceListenPrompt || _engine.isExploringRange) {
+      _voice.clearLastLine(notify: false);
     }
-    // The reference has stopped. The user will sing alone after the countdown.
-    await _voice.speakOnce(
-      'now-try-${_engine.currentRound}-'
-      '${_engine.currentRangePoint?.name}-'
-      '${_engine.stage1FailureCount}-'
-      '${_engine.rangePointFailureCount}',
-      TutorScripts.nowTryThatSound,
-      pauseAfter: _timing.shortTransitionPause,
-    );
     notifyListeners();
   }
 
@@ -655,6 +1138,9 @@ class TutorSession extends ChangeNotifier {
     }
     _countdownEpoch += 1;
     _countdownEmitted.clear();
+    // Always clear before countdown so a stale "1..." cannot paint between
+    // the listen screen and the first countdown line.
+    _voice.clearLastLine(notify: false);
     notifyListeners();
   }
 
@@ -668,13 +1154,20 @@ class TutorSession extends ChangeNotifier {
       return;
     }
     _countdownEmitted.add(value);
-    final lines = _engine.countdownKind == AssistCountdownKind.singTogether
-        ? TutorScripts.assistedCountdown
-        : TutorScripts.countdown;
+    final List<String> lines;
+    if (_engine.countdownKind == AssistCountdownKind.singTogether) {
+      lines = TutorScripts.assistedCountdown;
+    } else if (_engine.rangePointFailureCount == 0) {
+      lines = TutorScripts.countdownFirst;
+    } else {
+      lines = TutorScripts.countdown;
+    }
     final index = 3 - value;
     if (index < 0 || index >= lines.length) {
       return;
     }
+    // Keep the listen-prompt hold until this line binds so the speak-start
+    // gap cannot flash a stale countdown fragment.
     await _voice.speakOnce(
       'countdown-$_countdownEpoch-$value-${_engine.countdownKind.name}',
       lines[index],
@@ -683,11 +1176,20 @@ class TutorSession extends ChangeNotifier {
     if (!_isLive(token)) {
       return;
     }
+    _holdReferenceListenPrompt = false;
     notifyListeners();
   }
 
   Future<void> _onBeforeListen() async {
-    // The countdown already started the user's turn. Do not add another line.
+    // Stage 2 with countdown skipped (zero step duration), or Stage 1 after
+    // guided-demo reference: enter singing UI without leaking prior transcript.
+    if (!_engine.isExploringRange) {
+      _beginStage1UserTurn();
+    } else {
+      _voice.clearLastLine(notify: false);
+    }
+    _holdReferenceListenPrompt = false;
+    notifyListeners();
   }
 
   Future<void> _onBeforeAssistedSinging() async {
@@ -709,7 +1211,21 @@ class TutorSession extends ChangeNotifier {
   }
 
   Future<void> _onAssistedReferenceWillStart() async {
-    if (!_isLive(_sessionToken)) {
+    final token = _sessionToken;
+    if (!_isLive(token)) {
+      return;
+    }
+    // Drop countdown "1..." before this screen paints, then own the transcript.
+    _holdReferenceListenPrompt = false;
+    _voice.clearLastLine(notify: false);
+    notifyListeners();
+    await _voice.speakOnce(
+      'assist-sing-prompt-${_engine.currentRound}-'
+      '${_engine.currentRangePoint?.name}',
+      TutorScripts.assistedSingAlongPrompt,
+      pauseAfter: Duration.zero,
+    );
+    if (!_isLive(token)) {
       return;
     }
     await _voice.beginReferenceAudio();
@@ -745,13 +1261,59 @@ class TutorSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Speaks the final success line before the confirmed Shruti sample starts.
+  Future<void> _onBeforeCompletionPlayback() async {
+    final token = _sessionToken;
+    if (!_isLive(token)) {
+      return;
+    }
+    _setStep(TutorStep.complete);
+    notifyListeners();
+    await _voice.speakOnce(
+      'complete-${_engine.referencePitch.label}',
+      TutorScripts.completion(_engine.referencePitch.label),
+    );
+  }
+
   Future<void> _onAfterListenWindow(bool captured) async {
     if (!captured) {
       return;
     }
-    final point = _engine.isExploringRange
-        ? _engine.currentRangePoint?.name
-        : 'stage1';
+    final token = _sessionToken;
+    if (!_engine.isExploringRange) {
+      _endStage1UserTurn();
+      _showStage1SuccessMark = true;
+      notifyListeners();
+      await _voice.speakOnce(
+        'stage1-success-${_engine.currentRound}',
+        TutorScripts.stage1Success,
+      );
+      if (!_isLive(token)) {
+        return;
+      }
+      await _voice.speakOnce(
+        'stage1-ready-next-${_engine.currentRound}',
+        TutorScripts.readyForNextStep,
+      );
+      if (!_isLive(token)) {
+        return;
+      }
+      await _awaitPrimaryAction(token, TutorPrimaryAction.imReadyForNextStep);
+      _showStage1SuccessMark = false;
+      notifyListeners();
+      // Speak the Stage 2 opening here so the engine stays blocked on this
+      // hook until the full clip finishes. Speaking at startingPointFound
+      // races the short Stage 2 transition and cuts the line off.
+      // Short pause only — Stage 2 entry no longer inserts multi-second waits
+      // before the first range intro.
+      await _voice.speakOnce(
+        'stage2-opening-${_engine.currentRound}-0',
+        TutorScripts.startingNoteSuccess.first,
+        pauseAfter: _timing.shortTransitionPause,
+      );
+      return;
+    }
+    final point = _engine.currentRangePoint?.name;
     await _voice.speakOnce(
       'listen-complete-${_engine.currentRound}-$point',
       TutorScripts.listenComplete,
@@ -786,6 +1348,28 @@ class TutorSession extends ChangeNotifier {
   void _onEngineChanged() {
     if (_isDisposed || _stopRequested) {
       return;
+    }
+    final phase = _engine.uiPhase;
+    // Always mirror terminal engine outcomes immediately so CTA state cannot
+    // lag behind a finish that answered questions on the engine directly.
+    if (phase == AssistUiPhase.completed) {
+      _setStep(TutorStep.complete);
+    } else if (phase == AssistUiPhase.rangeUnresolved) {
+      _setStep(TutorStep.unresolved);
+    } else if (_step == TutorStep.complete || _step == TutorStep.unresolved) {
+      // Engine Try Again / restart: clear stale narrative for the new search.
+      _lastHandledPhase = null;
+      _lastHandledStage1FailureCount = 0;
+      _unclearAnswerCount = 0;
+      _questionOpen = false;
+      _differentSoundChoiceReady = false;
+      _showStage1SuccessMark = false;
+      _stage1ExampleControls = false;
+      _stage1RecoveryInstruction = false;
+      _endStage1UserTurn();
+      _holdReferenceListenPrompt = false;
+      _voice.resetEventKeys();
+      _voice.clearLastLine(notify: false);
     }
     if (_handlingPhase) {
       _phaseDirty = true;
@@ -853,11 +1437,8 @@ class TutorSession extends ChangeNotifier {
         _lastHandledStage1FailureCount = _engine.stage1FailureCount;
         await _onStartingNoteFailure();
       case AssistUiPhase.startingPointFound:
+        // Opening line already finished in afterListenWindow after "I'm ready".
         _setStep(TutorStep.startingNoteCaptured);
-        await _voice.speakAll(
-          TutorScripts.startingNoteSuccess,
-          eventIdPrefix: 'stage1-success',
-        );
       case AssistUiPhase.awaitingLowerAudibility:
         _questionOpen = true;
         _setStep(TutorStep.askLowerAudibility);
@@ -866,6 +1447,14 @@ class TutorSession extends ChangeNotifier {
           TutorScripts.lowerAudibilityQuestion,
         );
         unawaited(_listenForYesNoAnswer());
+      case AssistUiPhase.awaitingPaComfort:
+        _questionOpen = true;
+        _setStep(TutorStep.askMiddleComfort);
+        await _voice.speakOnce(
+          'ask-pa-${_engine.currentRound}',
+          TutorScripts.upperComfortQuestion,
+        );
+        unawaited(_listenForComfortAnswer());
       case AssistUiPhase.awaitingUpperComfort:
         _questionOpen = true;
         _setStep(TutorStep.askUpperComfort);
@@ -882,20 +1471,20 @@ class TutorSession extends ChangeNotifier {
         _differentSoundChoiceReady = false;
         _setStep(TutorStep.offerDifferentSound);
         notifyListeners();
-        await _speakRecoveryLine(
+        await _speakRecoveryDialogue(
           'easier-${_engine.currentRound}-'
           '${_engine.currentExploreCandidate?.label}-'
           '${_engine.currentRangePoint?.name}',
-          TutorScripts.makeThisEasier,
+          TutorDialogues.s70,
         );
         if (!_isLive(token)) {
           return;
         }
-        await _speakRecoveryLine(
+        await _speakRecoveryDialogue(
           'offer-sound-${_engine.currentRound}-'
           '${_engine.currentExploreCandidate?.label}-'
           '${_engine.currentRangePoint?.name}',
-          TutorScripts.offerDifferentSound,
+          TutorDialogues.s71,
         );
         if (!_isLive(token)) {
           return;
@@ -925,11 +1514,9 @@ class TutorSession extends ChangeNotifier {
           eventIdPrefix: 'unresolved',
         );
       case AssistUiPhase.completed:
+        // Success speech + Shruti playback sequencing is owned by
+        // [AssistTutorHooks.beforeCompletionPlayback].
         _setStep(TutorStep.complete);
-        await _voice.speakOnce(
-          'complete-${_engine.referencePitch.label}',
-          TutorScripts.completion(_engine.referencePitch.label),
-        );
       case AssistUiPhase.showingTransition:
       case AssistUiPhase.intro:
       case AssistUiPhase.countdown:
@@ -948,29 +1535,48 @@ class TutorSession extends ChangeNotifier {
   }
 
   Future<void> _onStartingNoteFailure() async {
+    final token = _sessionToken;
+    _endStage1UserTurn();
     _setStep(TutorStep.startingNoteFailure);
     final level = _engine.teachingLevel;
     final failure = _engine.stage1FailureCount;
     switch (level) {
       case TutorTeachingLevel.standard:
       case TutorTeachingLevel.retryOnce:
-        await _voice.speakAll(
-          TutorScripts.startingNoteRetryOnce,
-          eventIdPrefix: 'stage1-retry-$failure',
-        );
       case TutorTeachingLevel.guided:
-        await _voice.speakAll(
-          TutorScripts.startingNoteGuided,
+        // S70 → S61. Each id supplies transcript text and audio clip.
+        // Must not speak S60 / S71 / S62 on this path.
+        await _voice.speakDialogues(
+          TutorDialogues.stage1FailureRecovery,
           eventIdPrefix: 'stage1-guided-$failure',
         );
+        if (_isLive(token)) {
+          // S61 finished: keep the same transcript; style → grey + show controls
+          // when the primary action is revealed (one notify, no text swap).
+          _stage1RecoveryInstruction = true;
+          _stage1ExampleControls = true;
+        }
       case TutorTeachingLevel.humAlong:
-        await _voice.speakAll(
-          TutorScripts.makeEasier,
-          eventIdPrefix: 'stage1-easy-$failure',
-        );
+        // Later Stage 1 struggle: hear-first path (not the S70→S61 sequence).
+        await _voice.speakDialogues(<TutorDialogue>[
+          TutorDialogues.s17,
+          TutorDialogues.s18,
+        ], eventIdPrefix: 'stage1-easy-$failure');
+        if (_isLive(token)) {
+          _stage1ExampleControls = true;
+        }
     }
 
-    if (_stage1AutoRetryCount >= maxStage1AutoRetries) {
+    if (!_isLive(token)) {
+      return;
+    }
+    // Wait for an explicit retry tap. Do not auto-play reference / sample audio.
+    await _awaitPrimaryAction(
+      token,
+      TutorPrimaryAction.letsTryAgain,
+      quietTransition: _stage1RecoveryInstruction,
+    );
+    if (!_isLive(token)) {
       return;
     }
     _stage1AutoRetryCount += 1;
@@ -1018,7 +1624,9 @@ class TutorSession extends ChangeNotifier {
 
   Future<void> _listenForComfortAnswer() async {
     final token = _sessionToken;
-    if (!_isLive(token) || _step != TutorStep.askUpperComfort) {
+    if (!_isLive(token) ||
+        (_step != TutorStep.askMiddleComfort &&
+            _step != TutorStep.askUpperComfort)) {
       return;
     }
     final available = await _speech.isAvailable;
@@ -1040,7 +1648,8 @@ class TutorSession extends ChangeNotifier {
         },
       );
       if (!_isLive(token) ||
-          _engine.uiPhase != AssistUiPhase.awaitingUpperComfort) {
+          (_engine.uiPhase != AssistUiPhase.awaitingPaComfort &&
+              _engine.uiPhase != AssistUiPhase.awaitingUpperComfort)) {
         return;
       }
       if (transcript == null || transcript.isEmpty) {
@@ -1127,7 +1736,8 @@ class TutorSession extends ChangeNotifier {
       eventIdPrefix: 'unclear-comfort-$_unclearAnswerCount',
     );
     if (_unclearAnswerCount <= 1 &&
-        _engine.uiPhase == AssistUiPhase.awaitingUpperComfort) {
+        (_engine.uiPhase == AssistUiPhase.awaitingPaComfort ||
+            _engine.uiPhase == AssistUiPhase.awaitingUpperComfort)) {
       unawaited(_listenForComfortAnswer());
     }
   }
@@ -1139,6 +1749,15 @@ class TutorSession extends ChangeNotifier {
     final phase = _engine.uiPhase;
     if (phase == AssistUiPhase.intro && !_welcomeStarted) {
       _setStep(TutorStep.welcome);
+      return;
+    }
+    // Terminal Stage 2 outcomes stay visible even if the explore flag cleared.
+    if (phase == AssistUiPhase.completed) {
+      _setStep(TutorStep.complete);
+      return;
+    }
+    if (phase == AssistUiPhase.rangeUnresolved) {
+      _setStep(TutorStep.unresolved);
       return;
     }
     if (!_engine.isExploringRange) {
@@ -1169,8 +1788,21 @@ class TutorSession extends ChangeNotifier {
     switch (phase) {
       case AssistUiPhase.awaitingLowerAudibility:
         _setStep(TutorStep.askLowerAudibility);
+        // Open CTAs when attaching to an unanswered question (e.g. tests).
+        // Do not reopen after [_claimQuestion] while the phase is unchanged.
+        if (_lastHandledPhase != AssistUiPhase.awaitingLowerAudibility) {
+          _questionOpen = true;
+        }
+      case AssistUiPhase.awaitingPaComfort:
+        _setStep(TutorStep.askMiddleComfort);
+        if (_lastHandledPhase != AssistUiPhase.awaitingPaComfort) {
+          _questionOpen = true;
+        }
       case AssistUiPhase.awaitingUpperComfort:
         _setStep(TutorStep.askUpperComfort);
+        if (_lastHandledPhase != AssistUiPhase.awaitingUpperComfort) {
+          _questionOpen = true;
+        }
       case AssistUiPhase.exploringNextShruti:
         _setStep(TutorStep.exploreNextShruti);
       case AssistUiPhase.offeringEasierSound:
@@ -1203,9 +1835,9 @@ class TutorSession extends ChangeNotifier {
     final phase = _engine.uiPhase;
     switch (phase) {
       case AssistUiPhase.playingReference:
-        return 'Listen';
+        return TutorScripts.referenceListenPrompt;
       case AssistUiPhase.assistedSinging:
-        return 'Practice together';
+        return TutorScripts.assistedSingAlongPrompt;
       case AssistUiPhase.countdown:
         return 'Your turn';
       case AssistUiPhase.listening:
@@ -1252,10 +1884,13 @@ class TutorSession extends ChangeNotifier {
   @override
   void dispose() {
     _isDisposed = true;
+    _voice.onChanged = null;
+    _saSample.onChanged = null;
     _engine.tutorHooks = null;
     _engine.removeListener(_onEngineChanged);
     unawaited(_speech.dispose());
     unawaited(_voice.dispose());
+    unawaited(_saSample.dispose());
     super.dispose();
   }
 }

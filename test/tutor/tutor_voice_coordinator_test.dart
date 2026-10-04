@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/tutor/tutor_answer.dart';
+import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
 import 'package:harmony/tutor/tutor_voice_coordinator.dart';
@@ -43,9 +44,9 @@ void main() {
       expect(events, isNotEmpty);
     });
 
-    test('stays in speech until the configured pause finishes', () async {
+    test('clears speaking before the configured sentence pause', () async {
       late final TutorVoiceCoordinator coordinator;
-      var speakingDuringPause = false;
+      var speakingDuringPause = true;
       coordinator = TutorVoiceCoordinator(
         voice: FakeTutorVoice(),
         timing: const TutorTimingConfig(
@@ -57,7 +58,7 @@ void main() {
       );
 
       await coordinator.speak('Hello');
-      expect(speakingDuringPause, isTrue);
+      expect(speakingDuringPause, isFalse);
       expect(coordinator.isSpeaking, isFalse);
     });
 
@@ -76,6 +77,78 @@ void main() {
 
       await coordinator.speak('One');
       expect(pauses, <Duration>[const Duration(milliseconds: 42)]);
+    });
+
+    test('speakDialogue binds transcript text and audio id atomically', () async {
+      final voice = FakeTutorVoice();
+      final coordinator = TutorVoiceCoordinator(
+        voice: voice,
+        timing: const TutorTimingConfig.instant(),
+      );
+
+      await coordinator.speakDialogue(TutorDialogues.s70);
+      expect(coordinator.lastLine, TutorDialogues.s70.text);
+      expect(coordinator.activeDialogue, same(TutorDialogues.s70));
+      expect(voice.playedAssets, <String>['S70']);
+      expect(voice.spoken, <String>[TutorDialogues.s70.text]);
+      expect(coordinator.playedAssetLog, <String>['S70']);
+    });
+
+    test('Stage 1 failure speaks S70 then S61 only', () async {
+      final voice = FakeTutorVoice();
+      final coordinator = TutorVoiceCoordinator(
+        voice: voice,
+        timing: const TutorTimingConfig.instant(),
+      );
+
+      await coordinator.speakDialogues(TutorDialogues.stage1FailureRecovery);
+      expect(voice.playedAssets, <String>['S70', 'S61']);
+      expect(voice.playedAssets, isNot(contains('S60')));
+      expect(voice.playedAssets, isNot(contains('S62')));
+      expect(voice.playedAssets, isNot(contains('S71')));
+      expect(voice.playedAssets, isNot(contains('S73')));
+      expect(coordinator.lastLine, TutorDialogues.s61.text);
+      expect(coordinator.activeDialogue, same(TutorDialogues.s61));
+      expect(coordinator.spokenLog, TutorScripts.startingNoteGuided);
+    });
+
+    test('obsolete cancel prevents a late dialogue from sticking as active', () async {
+      final voice = FakeTutorVoice();
+      final coordinator = TutorVoiceCoordinator(
+        voice: voice,
+        timing: const TutorTimingConfig.instant(),
+      );
+
+      voice.onPlayAssets = (ids) async {
+        if (ids.length == 1 && ids.first == 'S70') {
+          coordinator.cancelSpeech();
+        }
+      };
+
+      await coordinator.speakDialogue(TutorDialogues.s70);
+      expect(coordinator.isSpeaking, isFalse);
+      expect(coordinator.activeDialogue, isNull);
+
+      // cancelSpeech blocks further speech until a new session resets keys.
+      coordinator.resetEventKeys();
+      await coordinator.speakDialogue(TutorDialogues.s61);
+      expect(coordinator.activeDialogue, same(TutorDialogues.s61));
+      expect(coordinator.lastLine, TutorDialogues.s61.text);
+      expect(voice.playedAssets, contains('S61'));
+    });
+
+    test('speak(text) resolves through the same dialogue definition as speakDialogue',
+        () async {
+      final voice = FakeTutorVoice();
+      final coordinator = TutorVoiceCoordinator(
+        voice: voice,
+        timing: const TutorTimingConfig.instant(),
+      );
+
+      await coordinator.speak(TutorScripts.makeThisEasier);
+      expect(coordinator.activeDialogue, same(TutorDialogues.s70));
+      expect(voice.playedAssets, <String>['S70']);
+      expect(coordinator.lastLine, TutorDialogues.s70.text);
     });
   });
 
@@ -165,7 +238,6 @@ void main() {
         ...TutorScripts.startingNoteSuccess,
         ...TutorScripts.startingNoteRetryOnce,
         ...TutorScripts.startingNoteGuided,
-        TutorScripts.nowTryThatSound,
         TutorScripts.listenFirst,
         TutorScripts.listenOnceMore,
         TutorScripts.rangeRetryOnce,

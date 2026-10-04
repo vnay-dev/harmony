@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/app/app.dart';
-import 'package:harmony/app/app_config.dart';
 import 'package:harmony/models/pitch.dart';
 
 import 'support/fake_audio_service.dart';
@@ -18,13 +17,48 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('shows app name, default Sa, and play control', (tester) async {
+  testWidgets('shows default Sa, play control, and Find my Shruti', (
+    tester,
+  ) async {
     await pumpApp(tester);
 
-    expect(find.text(AppConfig.appName), findsOneWidget);
-    expect(find.text('Sa'), findsOneWidget);
-    expect(find.text('C'), findsWidgets);
-    expect(find.text('Play'), findsOneWidget);
+    expect(find.text('C'), findsOneWidget);
+    expect(find.bySemanticsLabel('Play'), findsOneWidget);
+    expect(
+      find.text('Not sure which Shruti is right for you?'),
+      findsOneWidget,
+    );
+    expect(find.text('Find my Shruti'), findsOneWidget);
+  });
+
+  testWidgets('tapping the pitch card opens all 12 notes', (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.byTooltip('Select Shruti'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Select Shruti'), findsOneWidget);
+    for (final pitch in Pitch.values) {
+      expect(find.text(pitch.label), findsWidgets);
+    }
+
+    await tester.tap(find.text('G'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Select Shruti'), findsNothing);
+    expect(find.text('G'), findsOneWidget);
+  });
+
+  testWidgets('closing the pitch sheet keeps the current Sa', (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.byTooltip('Select Shruti'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Select Shruti'), findsNothing);
+    expect(find.text('C'), findsOneWidget);
   });
 
   testWidgets('selecting a pitch updates the selected Sa display', (
@@ -32,44 +66,37 @@ void main() {
   ) async {
     await pumpApp(tester);
 
-    await tester.tap(find.text('G'));
+    await tester.tap(find.byTooltip('Higher Sa'));
     await tester.pumpAndSettle();
 
-    expect(find.text(Pitch.g.label), findsWidgets);
+    expect(find.text(Pitch.cSharp.label), findsOneWidget);
   });
 
   testWidgets('all 12 pitch options can be selected', (tester) async {
     await pumpApp(tester);
 
-    for (final pitch in Pitch.values) {
-      await tester.ensureVisible(find.text(pitch.label).last);
-      await tester.tap(find.text(pitch.label).last);
+    var pitch = Pitch.c;
+    for (var step = 0; step < Pitch.values.length; step++) {
+      expect(find.text(pitch.label), findsOneWidget);
+      await tester.tap(find.byTooltip('Higher Sa'));
       await tester.pumpAndSettle();
-
-      expect(
-        find.descendant(
-          of: find.byType(Scaffold),
-          matching: find.text(pitch.label),
-        ),
-        findsWidgets,
-      );
+      pitch = pitch.next;
     }
+
+    expect(find.text(Pitch.c.label), findsOneWidget);
   });
 
   testWidgets('play and pause update the button label', (tester) async {
     await pumpApp(tester);
 
-    final playFinder = find.text('Play');
-    await tester.ensureVisible(playFinder);
-    await tester.tap(playFinder);
-    await tester.pumpAndSettle();
-    expect(find.text('Pause'), findsOneWidget);
+    await tester.tap(find.bySemanticsLabel('Play'));
+    // Looping play ripple never settles; advance a frame instead.
+    await tester.pump();
+    expect(find.bySemanticsLabel('Pause'), findsOneWidget);
 
-    final pauseFinder = find.text('Pause');
-    await tester.ensureVisible(pauseFinder);
-    await tester.tap(pauseFinder);
+    await tester.tap(find.bySemanticsLabel('Pause'));
     await tester.pumpAndSettle();
-    expect(find.text('Play'), findsOneWidget);
+    expect(find.bySemanticsLabel('Play'), findsOneWidget);
   });
 
   testWidgets('pitch can change while playing without stopping', (
@@ -77,15 +104,16 @@ void main() {
   ) async {
     await pumpApp(tester);
 
-    await tester.ensureVisible(find.text('Play'));
-    await tester.tap(find.text('Play'));
-    await tester.pumpAndSettle();
-    expect(find.text('Pause'), findsOneWidget);
+    await tester.tap(find.bySemanticsLabel('Play'));
+    await tester.pump();
+    expect(find.bySemanticsLabel('Pause'), findsOneWidget);
 
-    await tester.tap(find.text('D'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Higher Sa'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Higher Sa'));
+    await tester.pump();
 
-    expect(find.text('Pause'), findsOneWidget);
-    expect(find.text(Pitch.d.label), findsWidgets);
+    expect(find.bySemanticsLabel('Pause'), findsOneWidget);
+    expect(find.text(Pitch.d.label), findsOneWidget);
   });
 }

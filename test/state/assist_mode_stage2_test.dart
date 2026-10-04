@@ -142,6 +142,8 @@ void main() {
       final phase = controller.uiPhase;
       if (phase == AssistUiPhase.awaitingLowerAudibility) {
         await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingPaComfort) {
+        await controller.reportPaComfortable();
       } else if (phase == AssistUiPhase.awaitingUpperComfort) {
         if (!markedFirstComfortable) {
           markedFirstComfortable = true;
@@ -161,7 +163,8 @@ void main() {
     }
   }
 
-  /// Answers Lower Yes when asked, then waits until Upper Sa comfort is ready.
+  /// Answers Lower Yes / Pa Comfortable when asked, then waits until Upper Sa
+  /// comfort is ready.
   ///
   /// While climbing, Lower Sa audibility is skipped — this still lands on
   /// [AssistUiPhase.awaitingUpperComfort].
@@ -172,6 +175,8 @@ void main() {
       final phase = controller.uiPhase;
       if (phase == AssistUiPhase.awaitingLowerAudibility) {
         await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingPaComfort) {
+        await controller.reportPaComfortable();
       } else if (phase == AssistUiPhase.awaitingUpperComfort) {
         return;
       } else if (phase == AssistUiPhase.completed ||
@@ -186,10 +191,16 @@ void main() {
     fail('Timed out waiting for Upper Sa comfort');
   }
 
-  /// Answers Lower Yes so Pa / Upper Sa matching can continue (initial only).
+  /// Answers Lower Yes so Pa matching can continue (initial only).
   Future<void> answerLowerAudibleYes(AssistModeController controller) async {
     expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
     await controller.reportLowerSaAudible();
+  }
+
+  /// Answers Pa Comfortable so Upper Sa matching can continue.
+  Future<void> answerPaComfortableYes(AssistModeController controller) async {
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    await controller.reportPaComfortable();
   }
 
   setUp(() {
@@ -251,7 +262,33 @@ void main() {
     await answerLowerAudibleYes(controller);
 
     expect(seen, contains(AssistRangePoint.pa));
-    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+  });
+
+  test('liveCentsFromTarget follows the Stage 2 matcher while listening', () async {
+    double? centsWhileListening;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        final hz = c.currentRangeTargetHz;
+        if (hz == null) {
+          return;
+        }
+        // Enough samples for a stable cents reading, not enough to latch match.
+        final flatHz = hz * 0.985;
+        for (var i = 0; i < 5; i++) {
+          detectionService.emit(voiced(flatHz));
+        }
+        centsWhileListening ??= c.liveCentsFromTarget;
+        await emitHz(detectionService, hz);
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(centsWhileListening, isNotNull);
+    expect(centsWhileListening, lessThan(0));
+    expect(controller.liveCentsFromTarget, isNull);
   });
 
   test(
@@ -281,13 +318,19 @@ void main() {
       await answerLowerAudibleYes(controller);
 
       expect(guideByPoint[AssistRangePoint.pa], 0.5);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(controller.currentRangePoint, AssistRangePoint.pa);
+      expect(controller.rangeTargetGuidePosition, 0.5);
+
+      await answerPaComfortableYes(controller);
+
       expect(guideByPoint[AssistRangePoint.upperSa], 1.0);
       expect(controller.currentRangePoint, AssistRangePoint.upperSa);
       expect(controller.rangeTargetGuidePosition, 1.0);
     },
   );
 
-  test('Lower Sa = Yes continues to Pa', () async {
+  test('Lower Sa = Yes continues to Pa comfort checkpoint', () async {
     final controller = buildRangeController(stage1Pitch: Pitch.c);
     addTearDown(controller.dispose);
 
@@ -298,9 +341,9 @@ void main() {
     await controller.reportLowerSaAudible();
 
     expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
-    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
     expect(controller.activeCandidateResult?.paMatched, isTrue);
-    expect(controller.activeCandidateResult?.upperSaMatched, isTrue);
+    expect(controller.activeCandidateResult?.upperSaMatched, isNot(true));
   });
 
   test('Lower Sa = No rejects candidate and moves upward', () async {
@@ -340,6 +383,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
     expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
 
     await controller.reportUpperSaComfortable();
@@ -348,11 +392,157 @@ void main() {
     expect(controller.testedCandidates.first.upperSaComfortable, isTrue);
     expect(controller.searchMode, AssistShrutiSearchMode.climbing);
     expect(controller.currentExploreCandidate, Pitch.cSharp);
-    // Climbing skips re-asking Lower Sa — lands on Upper Sa comfort.
-    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    // Climbing skips re-asking Lower Sa — lands on Pa comfort first.
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
     expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
     expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
   });
+
+  test(
+    'pitch-correct middle note + Comfortable continues to Upper Sa',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await answerLowerAudibleYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(controller.activeCandidateResult?.paMatched, isTrue);
+
+      await controller.reportPaComfortable();
+
+      expect(controller.activeCandidateResult?.paComfortable, isTrue);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(controller.currentRangePoint, AssistRangePoint.upperSa);
+      expect(controller.searchMode, AssistShrutiSearchMode.initial);
+    },
+  );
+
+  test('pitch-correct middle note + Not comfortable seeks lower', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+
+    await controller.reportPaStrained();
+
+    expect(controller.testedCandidates.first.paComfortable, isFalse);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.currentExploreCandidate, Pitch.fSharp);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.uiPhase, isNot(AssistUiPhase.completed));
+  });
+
+  test(
+    'climbing Pa not comfortable finishes at last comfortable Shruti',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, Pitch.c);
+      expect(controller.searchMode, AssistShrutiSearchMode.climbing);
+
+      // Next candidate: Lower skipped, Pa matched → comfort question.
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      await controller.reportPaStrained();
+
+      expect(controller.uiPhase, AssistUiPhase.rangeBoundaryReached);
+      expect(controller.currentBoundaryShruti, Pitch.cSharp);
+      await controller.acknowledgeRangeBoundary();
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+    },
+  );
+
+  test(
+    'pitch-correct Upper Sa + Not comfortable uses existing strain path',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.g);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(controller.activeCandidateResult?.upperSaMatched, isTrue);
+
+      await controller.reportUpperSaStrained();
+
+      expect(controller.testedCandidates.first.upperSaComfortable, isFalse);
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+      expect(controller.currentExploreCandidate, Pitch.fSharp);
+    },
+  );
+
+  test('audible Lower Sa Yes continues normally to Pa', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+
+    await controller.reportLowerSaAudible();
+
+    expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.currentRangePoint, AssistRangePoint.pa);
+  });
+
+  test('pitch-correct Lower Sa + not audible seeks higher', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+
+    await controller.reportLowerSaTooLow();
+
+    expect(controller.testedCandidates.first.lowerSaAudible, isFalse);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+  });
+
+  test(
+    'pitch miss retries before feedback; feedback waits for a match',
+    () async {
+      var lowerMisses = 0;
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          if (c.currentRangePoint == AssistRangePoint.lowerSa) {
+            lowerMisses += 1;
+            if (lowerMisses == 1) {
+              // Wrong pitch — must retry, not ask feedback yet.
+              await emitHz(
+                detectionService,
+                frequencyHzForPitch(Pitch.g, octave: 3),
+              );
+              return;
+            }
+          }
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+
+      expect(lowerMisses, greaterThanOrEqualTo(2));
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+      expect(controller.activeCandidateResult?.lowerSaAudible, isNull);
+    },
+  );
 
   test('C comfortable then C# strained → final Shruti is C', () async {
     final controller = buildRangeController(stage1Pitch: Pitch.c);
@@ -431,6 +621,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
     await controller.reportUpperSaStrained();
 
     expect(controller.uiPhase, AssistUiPhase.rangeUnresolved);
@@ -657,6 +848,7 @@ void main() {
     await controller.startSession();
     // Lower audibility Yes must not change matching rules for Upper Sa.
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
 
     expect(wrongUpperAttempts, 3);
     expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
@@ -670,6 +862,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
     expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
 
     final first = controller.reportUpperSaComfortable();
@@ -789,7 +982,7 @@ void main() {
     await answerLowerAudibleYes(controller);
 
     expect(seenTargets?.paPitch, Pitch.gSharp);
-    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
   });
 
   test('Pa does not advance on the wrong pitch', () async {
@@ -823,7 +1016,7 @@ void main() {
     expect(controller.activeCandidateResult?.paMatched, isNot(true));
   });
 
-  test('successful Pa match advances to Upper Sa', () async {
+  test('successful Pa match awaits comfort before Upper Sa', () async {
     final seen = <AssistRangePoint>[];
     final controller = buildRangeController(
       stage1Pitch: Pitch.cSharp,
@@ -844,12 +1037,20 @@ void main() {
     await answerLowerAudibleYes(controller);
 
     expect(seen, contains(AssistRangePoint.pa));
+    expect(seen, isNot(contains(AssistRangePoint.upperSa)));
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.activeCandidateResult?.paMatched, isTrue);
+    expect(controller.activeCandidateResult?.paComfortable, isNull);
+
+    await answerPaComfortableYes(controller);
+
     expect(seen, contains(AssistRangePoint.upperSa));
     expect(
       seen.indexOf(AssistRangePoint.pa),
       lessThan(seen.indexOf(AssistRangePoint.upperSa)),
     );
     expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.activeCandidateResult?.paComfortable, isTrue);
   });
 
   test('Upper Sa is one octave above Lower Sa', () async {
@@ -870,6 +1071,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
 
     expect(upperHz, frequencyHzForPitch(Pitch.cSharp, octave: 4));
     expect(
@@ -902,6 +1104,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
 
     expect(upperWrongAttempts, 3);
     expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
@@ -915,6 +1118,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
 
     expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
     expect(controller.stage1Shruti, Pitch.cSharp);
@@ -1056,6 +1260,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
     await controller.reportUpperSaComfortable();
     expect(controller.lastComfortableShruti, Pitch.e);
     expect(controller.testedCandidates, isNotEmpty);
@@ -1086,6 +1291,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
     await controller.reportUpperSaComfortable();
     await reachUpperComfortQuestion(controller);
     await controller.reportUpperSaStrained();
@@ -1100,6 +1306,7 @@ void main() {
     expect(first.lowerSaMatched, isTrue);
     expect(first.lowerSaAudible, isTrue);
     expect(first.paMatched, isTrue);
+    expect(first.paComfortable, isTrue);
     expect(first.upperSaMatched, isTrue);
     expect(first.upperSaComfortable, isTrue);
     final boundary = controller.testedCandidates.last;
@@ -1126,7 +1333,10 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    expect(seen, [AssistRangePoint.lowerSa, AssistRangePoint.pa]);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
 
+    await answerPaComfortableYes(controller);
     expect(seen, [
       AssistRangePoint.lowerSa,
       AssistRangePoint.pa,
@@ -1145,10 +1355,14 @@ void main() {
       expect(referenceSound.playedFrequencies, hasLength(1));
 
       await answerLowerAudibleYes(controller);
-      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
-      expect(referenceSound.playedFrequencies, hasLength(3));
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(referenceSound.playedFrequencies, hasLength(2));
       expect(referenceSound.playedFrequencies[0], closeTo(130.81, 0.02));
       expect(referenceSound.playedFrequencies[1], closeTo(196.00, 0.02));
+
+      await answerPaComfortableYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(referenceSound.playedFrequencies, hasLength(3));
       expect(referenceSound.playedFrequencies[2], closeTo(261.63, 0.02));
       expect(referenceSound.stopCount, greaterThanOrEqualTo(3));
     },
@@ -1160,6 +1374,7 @@ void main() {
 
     await controller.startSession();
     await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
 
     expect(referenceSound.playCount, 3);
     expect(
@@ -1251,7 +1466,7 @@ void main() {
       expect(matchedDuringAssist, isFalse);
       expect(analysisDuringSoloListen, isTrue);
       expect(paSolos, greaterThan(2));
-      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
       expect(controller.assistedAttemptCount, 0);
       expect(controller.recoveryMode, AssistRecoveryMode.normal);
     },

@@ -9,6 +9,7 @@ class TutorTimingConfig {
     this.referenceToSpeechPause = const Duration(milliseconds: 650),
     this.afterSpeechBeforeListenPause = const Duration(milliseconds: 500),
     this.speechResponseListenDuration = const Duration(seconds: 5),
+    this.exampleReadyAffirmationDuration = const Duration(milliseconds: 1400),
   });
 
   /// Instant timing for deterministic unit tests.
@@ -18,7 +19,8 @@ class TutorTimingConfig {
       speechToReferencePause = Duration.zero,
       referenceToSpeechPause = Duration.zero,
       afterSpeechBeforeListenPause = Duration.zero,
-      speechResponseListenDuration = const Duration(milliseconds: 1);
+      speechResponseListenDuration = const Duration(milliseconds: 1),
+      exampleReadyAffirmationDuration = const Duration(milliseconds: 1);
 
   /// Pause between consecutive spoken sentences.
   final Duration sentencePause;
@@ -32,9 +34,12 @@ class TutorTimingConfig {
   /// Pause after reference audio stops before the next spoken line.
   final Duration referenceToSpeechPause;
 
-  /// Pause after "Now try that sound." before mic listening begins.
+  /// Pause after a spoken handoff before mic listening begins.
   final Duration afterSpeechBeforeListenPause;
 
   /// How long to listen for a spoken Yes/No or comfort answer.
   final Duration speechResponseListenDuration;
+
+  /// How long "New sound loaded" stays on the example button.
+  final Duration exampleReadyAffirmationDuration;
 }

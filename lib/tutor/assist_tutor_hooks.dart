@@ -15,6 +15,7 @@ class AssistTutorHooks {
     this.onAssistedReferenceWillStart,
     this.afterAssistedSinging,
     this.afterAssistedPracticeUnconfirmed,
+    this.beforeCompletionPlayback,
   });
 
   /// Speak intro lines before reference audio starts (engine has not played yet).
@@ -53,4 +54,10 @@ class AssistTutorHooks {
 
   /// Practice ended with no confirmed user match. Do not claim the user is ready.
   final Future<void> Function()? afterAssistedPracticeUnconfirmed;
+
+  /// Final success dialogue before the confirmed Shruti sample starts.
+  ///
+  /// The engine has stopped any prior sample/reference audio. The Shruti
+  /// sample must not start until this Future completes.
+  final Future<void> Function()? beforeCompletionPlayback;
 }
