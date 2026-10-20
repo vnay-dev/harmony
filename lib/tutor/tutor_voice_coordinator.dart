@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:harmony/tutor/tutor_audio_catalog.dart';
 import 'package:harmony/tutor/tutor_dialogue.dart';
+import 'package:harmony/tutor/tutor_dialogue_timing.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
 import 'package:harmony/tutor/tutor_voice.dart';
 
@@ -33,6 +34,8 @@ class TutorVoiceCoordinator {
   void Function()? onChanged;
 
   bool _isSpeaking = false;
+  bool _holdTranscript = false;
+  Duration? _transcriptRevealDuration;
   bool _referenceActive = false;
   bool _isDisposed = false;
   bool _cancelled = false;
@@ -44,6 +47,18 @@ class TutorVoiceCoordinator {
   final List<String> _playedAssetLog = <String>[];
 
   bool get isSpeaking => _isSpeaking;
+
+  /// True after a line is selected until synchronizing playback actually starts.
+  ///
+  /// Buttons stay hidden because [isSpeaking] is already true. The typewriter
+  /// stays at the first character until this is false.
+  bool get isHoldingTranscript => _holdTranscript;
+
+  /// Loaded clip length for the typewriter, once playback has started.
+  ///
+  /// Null uses the text estimate (bundled clips, text-only, or TTS failure).
+  Duration? get transcriptRevealDuration => _transcriptRevealDuration;
+
   bool get isReferenceActive => _referenceActive;
   String? get lastLine => _lastLine;
 
@@ -68,10 +83,13 @@ class TutorVoiceCoordinator {
 
   /// Marks that musical reference audio is about to play.
   ///
-  /// Blocks new speech until [endReferenceAudio].
+  /// Stops any leftover tutor audio so it cannot overlap the tone, and blocks
+  /// new speech until [endReferenceAudio].
   Future<void> beginReferenceAudio() async {
+    await _voice.stop();
+    _holdTranscript = false;
+    _transcriptRevealDuration = null;
     if (_isSpeaking) {
-      await _voice.stop();
       _isSpeaking = false;
       _emitChanged();
     }
@@ -90,6 +108,8 @@ class TutorVoiceCoordinator {
     _referenceActive = false;
     final wasSpeaking = _isSpeaking;
     _isSpeaking = false;
+    _holdTranscript = false;
+    _transcriptRevealDuration = null;
     _activeDialogue = null;
     unawaited(_voice.stop());
     if (wasSpeaking) {
@@ -154,55 +174,23 @@ class TutorVoiceCoordinator {
         ? const <String>[]
         : <String>[dialogue.id];
 
-    // Mark speaking first, but bind transcript only when audio is about to
-    // start — otherwise the screen can show a line while ExoPlayer is still
-    // Initializing and the user hears silence or the next line.
-    _isSpeaking = true;
-    _activeDialogue = null;
-    _lastLine = null;
-    _playedAssetLog.addAll(assetIds);
-    _emitChanged();
-
-    void bindTranscript() {
-      if (_cancelled || _isDisposed || epoch != _speechEpoch) {
-        return;
-      }
-      _activeDialogue = dialogue;
-      _lastLine = dialogue.text;
-      _spokenLog.add(dialogue.text);
-      _emitChanged();
-      _log(
-        'TUTOR',
-        'id=${dialogue.id} text="${dialogue.text}" audio=${dialogue.assetFileName}',
-      );
-    }
-
-    try {
-      if (assetIds.isNotEmpty) {
-        await _voice.playAssets(assetIds, onStarted: bindTranscript);
-      } else {
-        bindTranscript();
-      }
-      if (_cancelled || _isDisposed || epoch != _speechEpoch) {
-        return;
-      }
-      if (_isSpeaking) {
-        _isSpeaking = false;
-        _emitChanged();
-      }
-      final pause = pauseAfter ?? timing.sentencePause;
-      if (pause > Duration.zero &&
-          !_isDisposed &&
-          !_cancelled &&
-          epoch == _speechEpoch) {
-        await _wait(pause);
-      }
-    } finally {
-      if (epoch == _speechEpoch && _isSpeaking) {
-        _isSpeaking = false;
-        _emitChanged();
-      }
-    }
+    await _speakTracked(
+      epoch: epoch,
+      transcript: dialogue.text,
+      dialogue: dialogue,
+      assetIds: assetIds,
+      pauseAfter: pauseAfter,
+      awaitPlaybackStart: _voice.synchronizesTranscript && assetIds.isNotEmpty,
+      startAudio: (onStarted) => assetIds.isEmpty
+          ? Future<void>.value()
+          : _voice.playAssets(assetIds, onStarted: onStarted),
+      log: () {
+        _log(
+          'TUTOR',
+          'id=${dialogue.id} text="${dialogue.text}" audio=${dialogue.assetFileName}',
+        );
+      },
+    );
   }
 
   /// Speaks [line] and waits [pauseAfter] (defaults to sentence pause).
@@ -241,51 +229,146 @@ class TutorVoiceCoordinator {
     } on StateError {
       assetIds = const <String>[];
     }
-    _isSpeaking = true;
-    _activeDialogue = null;
-    _lastLine = null;
-    _playedAssetLog.addAll(assetIds);
-    _emitChanged();
+    await _speakTracked(
+      epoch: epoch,
+      transcript: trimmed,
+      dialogue: null,
+      assetIds: assetIds,
+      pauseAfter: pauseAfter,
+      awaitPlaybackStart: _voice.synchronizesTranscript,
+      startAudio: (onStarted) => _voice.speak(trimmed, onStarted: onStarted),
+      log: () {
+        _log(
+          'TUTOR DIALOGUE',
+          'id: (unmapped) text: "$trimmed" audio: ${assetIds.join(",")}',
+        );
+      },
+    );
+  }
 
-    void bindTranscript() {
-      if (_cancelled || _isDisposed || epoch != _speechEpoch) {
-        return;
-      }
-      _lastLine = trimmed;
-      _spokenLog.add(trimmed);
-      _emitChanged();
-      _log(
-        'TUTOR DIALOGUE',
-        'id: (unmapped) text: "$trimmed" audio: ${assetIds.join(",")}',
-      );
-      _log('TUTOR TRANSCRIPT', 'id: (unmapped) text: "$trimmed"');
-    }
+  /// Binds [transcript], starts audio immediately, then paces the typewriter.
+  ///
+  /// Synchronizing voices hold the animation until [onStarted]. The reveal
+  /// length is [TutorVoice.playbackDuration] when playback has a loaded clip.
+  /// Text-only speech and TTS failure pass a null duration and use the text
+  /// estimate, starting as soon as [onStarted] runs.
+  Future<void> _speakTracked({
+    required int epoch,
+    required String transcript,
+    required TutorDialogue? dialogue,
+    required List<String> assetIds,
+    required bool awaitPlaybackStart,
+    required Future<void> Function(void Function()? onStarted) startAudio,
+    required Duration? pauseAfter,
+    required void Function() log,
+  }) async {
+    _isSpeaking = true;
+    _activeDialogue = dialogue;
+    _lastLine = transcript;
+    _spokenLog.add(transcript);
+    _playedAssetLog.addAll(assetIds);
+
+    final started = Completer<void>();
+    Duration? playbackDuration;
+    final playback = startAudio(
+      awaitPlaybackStart
+          ? () {
+              if (epoch != _speechEpoch || _cancelled || _isDisposed) {
+                return;
+              }
+              final reported = _voice.playbackDuration;
+              playbackDuration = reported != null && reported > Duration.zero
+                  ? reported
+                  : null;
+              if (!started.isCompleted) {
+                started.complete();
+              }
+            }
+          : null,
+    );
+
+    final waitingForAudio = awaitPlaybackStart && !started.isCompleted;
+    _holdTranscript = waitingForAudio;
+    _transcriptRevealDuration = waitingForAudio ? null : playbackDuration;
+    _emitChanged();
+    log();
 
     try {
-      // Keep [speak] for composite lines (e.g. completion) so fakes record the
-      // full transcript string once while AssetTutorVoice still plays by id.
-      // Always call speak (even with no clips) so fakes still record the line;
-      // bindTranscript runs from onStarted when audible playback begins.
-      await _voice.speak(trimmed, onStarted: bindTranscript);
-      if (_cancelled || _isDisposed || epoch != _speechEpoch) {
-        return;
-      }
-      if (_isSpeaking) {
-        _isSpeaking = false;
+      if (waitingForAudio) {
+        await Future.any<void>([
+          started.future,
+          playback.catchError((Object _) {}),
+        ]);
+        if (epoch != _speechEpoch ||
+            _cancelled ||
+            _isDisposed ||
+            !_isSpeaking) {
+          return;
+        }
+        _holdTranscript = false;
+        _transcriptRevealDuration = started.isCompleted
+            ? playbackDuration
+            : null;
         _emitChanged();
       }
-      final pause = pauseAfter ?? timing.sentencePause;
-      if (pause > Duration.zero &&
-          !_isDisposed &&
-          !_cancelled &&
-          epoch == _speechEpoch) {
-        await _wait(pause);
-      }
+      await _paceLine(
+        epoch: epoch,
+        transcript: transcript,
+        playback: playback,
+        pauseAfter: pauseAfter,
+        revealDuration: _transcriptRevealDuration,
+      );
     } finally {
+      _holdTranscript = false;
       if (epoch == _speechEpoch && _isSpeaking) {
         _isSpeaking = false;
+        _transcriptRevealDuration = null;
         _emitChanged();
       }
+    }
+  }
+
+  /// Holds [isSpeaking] until [transcript] has finished printing.
+  ///
+  /// [revealDuration] is the loaded playback length when audio has started.
+  /// Otherwise the text estimate is used. Playback does not add a further
+  /// wait. With transcript pacing off (tests), this waits for [playback] so
+  /// fakes stay deterministic.
+  Future<void> _paceLine({
+    required int epoch,
+    required String transcript,
+    required Future<void> playback,
+    Duration? pauseAfter,
+    Duration? revealDuration,
+  }) async {
+    final estimated =
+        TutorDialogueTiming.forLine(transcript)?.duration ?? Duration.zero;
+    final paced = revealDuration != null && revealDuration > Duration.zero
+        ? revealDuration
+        : estimated;
+    final reveal = timing.paceTranscript ? paced : Duration.zero;
+    if (reveal > Duration.zero) {
+      unawaited(playback.catchError((Object _) {}));
+      if (!_isDisposed && !_cancelled && epoch == _speechEpoch) {
+        await _wait(reveal);
+      }
+    } else {
+      await playback;
+    }
+    if (_cancelled || _isDisposed || epoch != _speechEpoch) {
+      return;
+    }
+    if (_isSpeaking) {
+      _isSpeaking = false;
+      _transcriptRevealDuration = null;
+      _emitChanged();
+    }
+    final pause = pauseAfter ?? timing.sentencePause;
+    if (pause > Duration.zero &&
+        !_isDisposed &&
+        !_cancelled &&
+        epoch == _speechEpoch) {
+      await _wait(pause);
     }
   }
 

@@ -1,13 +1,8 @@
 import 'dart:async';
-import 'dart:developer' as developer;
 
-import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
-import 'package:harmony/tutor/tutor_audio_catalog.dart';
-import 'package:harmony/tutor/tutor_voice.dart';
-
-/// Plays one bundled clip and completes when it ends or is stopped.
+/// Plays one clip and completes when it ends or is stopped.
 abstract class TutorClipPlayer {
   Future<void> playToEnd(String assetPath, {void Function()? onStarted});
 
@@ -34,6 +29,9 @@ abstract class TutorClipTransport {
 
   Stream<ProcessingState> get processingStateStream;
 
+  /// Length of the clip most recently loaded, when the player reported one.
+  Duration? get duration;
+
   /// Keeps the native player alive while clearing the playing flag.
   Future<void> pause();
 
@@ -58,6 +56,7 @@ class JustAudioTutorClipTransport implements TutorClipTransport {
     : _player = player ?? AudioPlayer(handleInterruptions: false);
 
   final AudioPlayer _player;
+  Duration? _duration;
 
   @override
   bool get isIdle => _player.processingState == ProcessingState.idle;
@@ -73,17 +72,26 @@ class JustAudioTutorClipTransport implements TutorClipTransport {
       _player.processingStateStream;
 
   @override
+  Duration? get duration => _duration ?? _player.duration;
+
+  @override
   Future<void> pause() => _player.pause();
 
   @override
   Future<void> load(String assetPath, {bool loop = false}) async {
-    await _player.setAsset(assetPath, initialPosition: Duration.zero);
+    _duration = await _player.setAsset(
+      assetPath,
+      initialPosition: Duration.zero,
+    );
     await _player.setLoopMode(loop ? LoopMode.one : LoopMode.off);
   }
 
   @override
   Future<void> loadFile(String filePath, {bool loop = false}) async {
-    await _player.setFilePath(filePath, initialPosition: Duration.zero);
+    _duration = await _player.setFilePath(
+      filePath,
+      initialPosition: Duration.zero,
+    );
     await _player.setLoopMode(loop ? LoopMode.one : LoopMode.off);
   }
 
@@ -115,6 +123,9 @@ class JustAudioTutorClipPlayer implements TutorClipPlayer {
   bool _disposed = false;
   Completer<void>? _finished;
 
+  /// Length of the file or asset loaded for the current clip.
+  Duration? get duration => _transport.duration;
+
   bool _isCurrent(int token) => !_disposed && token == _token;
 
   void _finishWaiting() {
@@ -133,7 +144,27 @@ class JustAudioTutorClipPlayer implements TutorClipPlayer {
   }
 
   @override
-  Future<void> playToEnd(String assetPath, {void Function()? onStarted}) async {
+  Future<void> playToEnd(String assetPath, {void Function()? onStarted}) {
+    return _playUntilEnd(
+      () => _transport.load(assetPath),
+      onStarted: onStarted,
+    );
+  }
+
+  /// Plays a local file (for example a generated WAV) to completion.
+  ///
+  /// Uses the same pause, completion, and interrupt behavior as [playToEnd].
+  Future<void> playFileToEnd(String filePath, {void Function()? onStarted}) {
+    return _playUntilEnd(
+      () => _transport.loadFile(filePath),
+      onStarted: onStarted,
+    );
+  }
+
+  Future<void> _playUntilEnd(
+    Future<void> Function() load, {
+    void Function()? onStarted,
+  }) async {
     final token = ++_token;
     if (_disposed) {
       return;
@@ -149,7 +180,7 @@ class JustAudioTutorClipPlayer implements TutorClipPlayer {
         return;
       }
 
-      await _transport.load(assetPath);
+      await load();
       if (!_isCurrent(token)) {
         return;
       }
@@ -252,115 +283,5 @@ class JustAudioTutorClipPlayer implements TutorClipPlayer {
     _token++;
     _finishWaiting();
     await _transport.dispose();
-  }
-}
-
-/// Plays the pre-generated tutor recordings.
-///
-/// Prefer [playAssets] with ids from a resolved [TutorDialogue]. [speak] remains
-/// for completion lines and tests that still pass script text.
-class AssetTutorVoice implements TutorVoice {
-  AssetTutorVoice({TutorClipPlayer? clips})
-    : _clips = clips ?? JustAudioTutorClipPlayer();
-
-  final TutorClipPlayer _clips;
-  int _generation = 0;
-  bool _disposed = false;
-  Future<void> _pending = Future<void>.value();
-
-  bool _isCurrent(int generation) => !_disposed && generation == _generation;
-
-  static void _log(String tag, String message) {
-    if (kDebugMode) {
-      debugPrint('[$tag] $message');
-      developer.log(message, name: tag);
-    }
-  }
-
-  @override
-  Future<void> speak(String text, {void Function()? onStarted}) {
-    if (_disposed) {
-      return Future<void>.value();
-    }
-    final assetIds = TutorAudioCatalog.assetIdsForSpokenLine(text);
-    return playAssets(assetIds, onStarted: onStarted);
-  }
-
-  @override
-  Future<void> playAssets(List<String> assetIds, {void Function()? onStarted}) {
-    if (_disposed) {
-      return Future<void>.value();
-    }
-    final generation = ++_generation;
-    // Soft-interrupt the current clip (pause + cancel wait). Do not hard-stop:
-    // stop() Releases ExoPlayer and the next load pays Init cost; on device that
-    // race has silenced a short clip while its transcript was already on screen.
-    final interrupted = _clips.interrupt();
-    final result =
-        Future.wait<void>([
-          _pending.catchError((Object _) {}),
-          interrupted,
-        ]).then((_) async {
-          if (!_isCurrent(generation)) {
-            return;
-          }
-          await _playAssets(assetIds, generation, onStarted: onStarted);
-        });
-    _pending = result.catchError((Object _) {});
-    return result;
-  }
-
-  Future<void> _playAssets(
-    List<String> assetIds,
-    int generation, {
-    void Function()? onStarted,
-  }) async {
-    if (!_isCurrent(generation)) {
-      return;
-    }
-    if (assetIds.isEmpty) {
-      onStarted?.call();
-      return;
-    }
-    var started = false;
-    for (final assetId in assetIds) {
-      if (!_isCurrent(generation)) {
-        return;
-      }
-      final path = TutorAudioCatalog.assetPath(assetId);
-      _log('TUTOR', 'id=$assetId audio=$assetId.mp3 path=$path');
-      await _clips.playToEnd(
-        path,
-        onStarted: started
-            ? null
-            : () {
-                started = true;
-                onStarted?.call();
-              },
-      );
-    }
-    if (!started) {
-      onStarted?.call();
-    }
-  }
-
-  @override
-  Future<void> stop() async {
-    _generation++;
-    // Drop queued play requests so a cancelled dialogue cannot start later.
-    _pending = Future<void>.value();
-    await _clips.stop();
-  }
-
-  @override
-  Future<void> dispose() async {
-    if (_disposed) {
-      return;
-    }
-    _disposed = true;
-    _generation++;
-    _pending = Future<void>.value();
-    await _clips.stop();
-    await _clips.dispose();
   }
 }

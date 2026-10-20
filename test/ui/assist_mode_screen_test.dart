@@ -13,6 +13,7 @@ import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/app_theme.dart';
+import 'package:harmony/tutor/tutor_dialogue_timing.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_session.dart';
 import 'package:harmony/tutor/tutor_speech_recognizer.dart';
@@ -221,6 +222,48 @@ void main() {
     expect(find.textContaining('Hz'), findsNothing);
     expect(find.textContaining('cents'), findsNothing);
     expect(find.textContaining('Tanpura'), findsNothing);
+  });
+
+  testWidgets('shows the next action only after the line finishes printing', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          detectionService: FakePitchDetectionService(),
+          audioService: FakeAudioService(),
+          candidateFinder: buildFinder(),
+          referenceSoundGenerator: FakeReferenceSoundGenerator(),
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig(),
+          prepareAudioSession: () async {},
+          wait: (_) async {},
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.textContaining("Hi, I'm Harmony", findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text(TutorScripts.ctaLetsBegin), findsNothing);
+
+    await tester.pump(
+      TutorDialogueTiming.durationFor(TutorScripts.welcome.first),
+    );
+    await tester.pump();
+
+    expect(find.text(TutorScripts.ctaLetsBegin), findsOneWidget);
+    expect(find.text(TutorScripts.ctaImReadyToSingSa), findsNothing);
   });
 
   testWidgets(

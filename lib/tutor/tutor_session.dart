@@ -113,6 +113,12 @@ class TutorSession extends ChangeNotifier {
 
   bool get isSpeaking => _voice.isSpeaking;
 
+  /// True while HTTP audio is still generating and the typewriter is waiting.
+  bool get isHoldingTranscript => _voice.isHoldingTranscript;
+
+  /// Loaded playback length for the current typewriter, when audio has started.
+  Duration? get transcriptRevealDuration => _voice.transcriptRevealDuration;
+
   /// True while waiting for a spoken Yes/No or comfort answer.
   bool get isListeningForSpeechAnswer => _listeningForSpeechAnswer;
 
@@ -1301,11 +1307,9 @@ class TutorSession extends ChangeNotifier {
       await _awaitPrimaryAction(token, TutorPrimaryAction.imReadyForNextStep);
       _showStage1SuccessMark = false;
       notifyListeners();
-      // Speak the Stage 2 opening here so the engine stays blocked on this
-      // hook until the full clip finishes. Speaking at startingPointFound
-      // races the short Stage 2 transition and cuts the line off.
-      // Short pause only — Stage 2 entry no longer inserts multi-second waits
-      // before the first range intro.
+      // Speak the Stage 2 opening here so the printed line finishes before
+      // Stage 2 continues. Leftover audio is stopped when reference playback
+      // starts.
       await _voice.speakOnce(
         'stage2-opening-${_engine.currentRound}-0',
         TutorScripts.startingNoteSuccess.first,

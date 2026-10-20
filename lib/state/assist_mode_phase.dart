@@ -4,7 +4,7 @@ class AssistTimingConfig {
     this.referencePlayDuration = const Duration(seconds: 5),
     this.settlingDuration = const Duration(milliseconds: 600),
     this.listenDuration = const Duration(seconds: 6),
-    this.transitionDuration = const Duration(seconds: 2),
+    this.transitionDuration = Duration.zero,
     this.stage2EntryTransitionDuration = const Duration(milliseconds: 1),
     this.countdownStepDuration = const Duration(seconds: 1),
     this.assistedSingDuration,
@@ -19,7 +19,10 @@ class AssistTimingConfig {
   /// How long the user should sing while Harmony listens.
   final Duration listenDuration;
 
-  /// Brief pause after listening before the next reference plays.
+  /// Hold after a singing result is already decided, before the next phase.
+  ///
+  /// Defaults to zero so the next instruction is not delayed. Listening,
+  /// reference playback, settling, and countdown use their own timers.
   final Duration transitionDuration;
 
   /// Hold while publishing Stage 2 entry phases after the opening dialogue.

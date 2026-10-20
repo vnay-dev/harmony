@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 
@@ -14,7 +15,9 @@ import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/theme/design_tokens.dart';
-import 'package:harmony/tutor/asset_tutor_voice.dart';
+import 'package:harmony/tutor/http_tutor_voice.dart';
+import 'package:harmony/tutor/kitten_tts_bootstrap.dart';
+import 'package:harmony/tutor/kitten_tutor_voice.dart';
 import 'package:harmony/tutor/speech_to_text_recognizer.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_session.dart';
@@ -27,6 +30,33 @@ import 'package:harmony/ui/components/tutor_action_button.dart';
 import 'package:harmony/ui/components/tutor_dialogue_text.dart';
 import 'package:harmony/ui/components/tutor_hear_sa_control.dart';
 import 'package:harmony/ui/components/tutor_presence_circle.dart';
+
+/// Debug-only. Profile and release builds ignore this define.
+const _useHttpTutorVoiceFromEnvironment = bool.fromEnvironment(
+  'USE_HTTP_TUTOR_VOICE',
+);
+
+bool _wantsHttpTutorVoice(bool useHttpTutorVoice) {
+  return useHttpTutorVoice || (kDebugMode && _useHttpTutorVoiceFromEnvironment);
+}
+
+/// Kitten Micro + Luna (1.1×) is the default when [tutorVoice] is omitted.
+///
+/// No feature flag is required. HTTP always wins when selected (widget flag or
+/// debug dart-define), including when both HTTP and Kitten flags are enabled.
+bool _wantsKittenTutorVoice({
+  required bool useHttpTutorVoice,
+  required bool useKittenTutorVoice,
+}) {
+  if (_wantsHttpTutorVoice(useHttpTutorVoice)) {
+    return false;
+  }
+  // Keep reading [useKittenTutorVoice] so the public flag stays part of the
+  // selection API (HTTP-vs-Kitten precedence tests). Enabling Kitten no longer
+  // depends on it.
+  final _ = useKittenTutorVoice;
+  return true;
+}
 
 /// Voice-first singing tutor that finds a comfortable Shruti.
 class AssistModeScreen extends StatefulWidget {
@@ -42,11 +72,14 @@ class AssistModeScreen extends StatefulWidget {
     TutorSession? tutorSession,
     TutorVoice? tutorVoice,
     TutorSpeechRecognizer? speechRecognizer,
+    KittenTtsBootstrap? kittenBootstrap,
     this.timing,
     this.tutorTiming,
     this.initialReferencePitch,
     this.wait,
     this.prepareAudioSession,
+    this.useHttpTutorVoice = false,
+    this.useKittenTutorVoice = false,
     this.autoBegin = true,
   }) : _detectionService = detectionService,
        _audioService = audioService,
@@ -57,7 +90,8 @@ class AssistModeScreen extends StatefulWidget {
        _controller = controller,
        _tutorSession = tutorSession,
        _tutorVoice = tutorVoice,
-       _speechRecognizer = speechRecognizer;
+       _speechRecognizer = speechRecognizer,
+       _kittenBootstrap = kittenBootstrap;
 
   final PitchDetectionService? _detectionService;
   final AudioService? _audioService;
@@ -69,6 +103,7 @@ class AssistModeScreen extends StatefulWidget {
   final TutorSession? _tutorSession;
   final TutorVoice? _tutorVoice;
   final TutorSpeechRecognizer? _speechRecognizer;
+  final KittenTtsBootstrap? _kittenBootstrap;
 
   /// Optional timing overrides (tests / tuning).
   final AssistTimingConfig? timing;
@@ -85,6 +120,19 @@ class AssistModeScreen extends StatefulWidget {
   /// Optional audio-session setup override (tests inject a no-op).
   final Future<void> Function()? prepareAudioSession;
 
+  /// Selects [HttpTutorVoice] when [tutorVoice] is omitted.
+  ///
+  /// Pass this for local testing against the laptop TTS server, or pass
+  /// [tutorVoice] to inject any voice. Takes precedence over Kitten (the
+  /// default) and over [useKittenTutorVoice].
+  final bool useHttpTutorVoice;
+
+  /// Explicit Kitten request when [tutorVoice] is omitted.
+  ///
+  /// Kitten Micro + Luna is already the default whenever HTTP is not selected,
+  /// so this flag is optional. Kept so HTTP still wins when both are true.
+  final bool useKittenTutorVoice;
+
   /// When true (default), welcome speech runs and waits for "Let's begin".
   final bool autoBegin;
 
@@ -94,9 +142,14 @@ class AssistModeScreen extends StatefulWidget {
 
 class _AssistModeScreenState extends State<AssistModeScreen> {
   late final AssistModeController _controller;
-  late final TutorSession _tutor;
+  TutorSession? _tutor;
   late final bool _ownsController;
-  late final bool _ownsTutor;
+  bool _ownsTutor = false;
+  KittenTtsBootstrap? _kittenBootstrap;
+  bool _ownsKittenBootstrap = false;
+  bool _kittenSessionStarted = false;
+
+  bool get _awaitingKittenReady => _kittenBootstrap != null && _tutor == null;
 
   @override
   void initState() {
@@ -125,49 +178,143 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       _ownsController = true;
     }
 
+    _controller.addListener(_onChanged);
+
     final injectedTutor = widget._tutorSession;
     if (injectedTutor != null) {
-      _tutor = injectedTutor;
-      _ownsTutor = false;
-    } else {
-      _tutor = TutorSession(
+      _attachTutor(injectedTutor, owns: false);
+      if (widget.autoBegin) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _tutor?.begin();
+          }
+        });
+      }
+      return;
+    }
+
+    final needsKitten =
+        widget._tutorVoice == null &&
+        _wantsKittenTutorVoice(
+          useHttpTutorVoice: widget.useHttpTutorVoice,
+          useKittenTutorVoice: widget.useKittenTutorVoice,
+        );
+
+    if (needsKitten) {
+      final injectedBootstrap = widget._kittenBootstrap;
+      if (injectedBootstrap != null) {
+        _kittenBootstrap = injectedBootstrap;
+        _ownsKittenBootstrap = false;
+      } else {
+        _kittenBootstrap = KittenTtsBootstrap();
+        _ownsKittenBootstrap = true;
+      }
+      _kittenBootstrap!.addListener(_onChanged);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_bootstrapKittenAndStart());
+        }
+      });
+      return;
+    }
+
+    // Non-Kitten path: injected voice, or HTTP debug voice (HTTP wins over Kitten).
+    _attachTutor(
+      TutorSession(
         engine: _controller,
-        voice: widget._tutorVoice ?? AssetTutorVoice(),
+        voice: widget._tutorVoice ?? HttpTutorVoice(),
         speechRecognizer:
             widget._speechRecognizer ?? SpeechToTextTutorRecognizer(),
         timing: widget.tutorTiming ?? const TutorTimingConfig(),
         // Do not share the engine wait — speech pauses must never block on
         // Assist listen/reference windows.
-      );
-      _ownsTutor = true;
-    }
-
-    _tutor.addListener(_onTutorChanged);
-    _controller.addListener(_onTutorChanged);
-
+      ),
+      owns: true,
+    );
     if (widget.autoBegin) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          _tutor.begin();
+          _tutor?.begin();
         }
       });
     }
   }
 
-  void _onTutorChanged() {
+  void _attachTutor(TutorSession tutor, {required bool owns}) {
+    _tutor = tutor;
+    _ownsTutor = owns;
+    tutor.addListener(_onChanged);
+  }
+
+  void _onChanged() {
     if (mounted) {
       setState(() {});
     }
   }
 
+  Future<void> _bootstrapKittenAndStart({bool forceRedownload = false}) async {
+    final bootstrap = _kittenBootstrap;
+    if (bootstrap == null || _kittenSessionStarted) {
+      return;
+    }
+    try {
+      final synthesizer = forceRedownload
+          ? await bootstrap.retry(forceRedownload: true)
+          : await bootstrap.ensureReady();
+      if (!mounted || _kittenSessionStarted) {
+        return;
+      }
+      _startKittenTutorSession(synthesizer);
+    } catch (_) {
+      // [KittenTtsBootstrap] already records failed state + error for the UI.
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  void _startKittenTutorSession(KittenTutorSynthesizer synthesizer) {
+    if (_kittenSessionStarted || !mounted) {
+      return;
+    }
+    _kittenSessionStarted = true;
+    final voice = KittenTutorVoice(
+      synthesizer: synthesizer,
+      // Bootstrap owns the engine lifetime for this screen.
+      ownsSynthesizer: false,
+    );
+    _attachTutor(
+      TutorSession(
+        engine: _controller,
+        voice: voice,
+        speechRecognizer:
+            widget._speechRecognizer ?? SpeechToTextTutorRecognizer(),
+        timing: widget.tutorTiming ?? const TutorTimingConfig(),
+      ),
+      owns: true,
+    );
+    setState(() {});
+    if (widget.autoBegin) {
+      unawaited(_tutor!.begin());
+    }
+  }
+
+  Future<void> _retryKittenBootstrap() {
+    return _bootstrapKittenAndStart();
+  }
+
   void _goHome() {
     // Detach before teardown so stop()/pop cannot rebuild a dying route.
-    _tutor.removeListener(_onTutorChanged);
-    _controller.removeListener(_onTutorChanged);
+    _tutor?.removeListener(_onChanged);
+    _controller.removeListener(_onChanged);
+    _kittenBootstrap?.removeListener(_onChanged);
 
-    if (_tutor.step != TutorStep.complete && _tutor.step != TutorStep.stopped) {
+    final tutor = _tutor;
+    if (tutor != null &&
+        tutor.step != TutorStep.complete &&
+        tutor.step != TutorStep.stopped) {
       // Start cancellation without awaiting listen/wait teardown.
-      unawaited(_tutor.stop());
+      unawaited(tutor.stop());
     }
     if (!mounted) {
       return;
@@ -180,10 +327,14 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 
   @override
   void dispose() {
-    _tutor.removeListener(_onTutorChanged);
-    _controller.removeListener(_onTutorChanged);
+    _tutor?.removeListener(_onChanged);
+    _controller.removeListener(_onChanged);
+    _kittenBootstrap?.removeListener(_onChanged);
     if (_ownsTutor) {
-      _tutor.dispose();
+      _tutor?.dispose();
+    }
+    if (_ownsKittenBootstrap) {
+      _kittenBootstrap?.dispose();
     }
     if (_ownsController) {
       _controller.dispose();
@@ -195,6 +346,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
+    final tutor = _tutor;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -206,7 +358,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
           ),
         ),
         actions: [
-          if (_tutor.showHome)
+          if (tutor == null || tutor.showHome)
             IconButton(
               key: const ValueKey<String>('tutor-home'),
               tooltip: 'Home',
@@ -221,16 +373,103 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(DesignTokens.spaceLg),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: _buildTutorSurface()),
-              const SizedBox(height: DesignTokens.spaceMd),
-              ..._buildActions(),
-            ],
-          ),
+          child: _awaitingKittenReady
+              ? _buildKittenReadyGate(context)
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: _buildTutorSurface(tutor!)),
+                    const SizedBox(height: DesignTokens.spaceMd),
+                    ..._buildActions(tutor),
+                  ],
+                ),
         ),
       ),
+    );
+  }
+
+  Widget _buildKittenReadyGate(BuildContext context) {
+    final bootstrap = _kittenBootstrap!;
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    if (bootstrap.state == KittenTtsReadyState.failed) {
+      final detail = bootstrap.error?.toString().trim();
+      return Column(
+        key: const ValueKey<String>('kitten-tts-error'),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Spacer(),
+          Icon(
+            Icons.error_outline_rounded,
+            size: 48,
+            color: colorScheme.error.withValues(alpha: 0.85),
+          ),
+          const SizedBox(height: DesignTokens.spaceMd),
+          Text(
+            'Could not prepare the tutor voice.',
+            style: textTheme.titleMedium,
+            textAlign: TextAlign.center,
+          ),
+          if (detail != null && detail.isNotEmpty) ...[
+            const SizedBox(height: DesignTokens.spaceSm),
+            Text(
+              detail,
+              key: const ValueKey<String>('kitten-tts-error-detail'),
+              style: textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurface.withValues(alpha: 0.62),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          const Spacer(),
+          TutorActionButton(
+            key: const ValueKey<String>('kitten-tts-retry'),
+            label: 'Retry',
+            onPressed: () {
+              unawaited(_retryKittenBootstrap());
+            },
+          ),
+        ],
+      );
+    }
+
+    final progress = bootstrap.progress;
+    final determinate = progress > 0 && progress < 1;
+    return Column(
+      key: const ValueKey<String>('kitten-tts-loading'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Spacer(),
+        Center(
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: CircularProgressIndicator(
+              key: const ValueKey<String>('kitten-tts-progress'),
+              value: determinate ? progress : null,
+            ),
+          ),
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        Text(
+          'Preparing tutor voice…',
+          style: textTheme.titleMedium,
+          textAlign: TextAlign.center,
+        ),
+        if (determinate) ...[
+          const SizedBox(height: DesignTokens.spaceSm),
+          Text(
+            '${(progress * 100).round()}%',
+            key: const ValueKey<String>('kitten-tts-progress-label'),
+            style: textTheme.bodyMedium?.copyWith(
+              color: colorScheme.onSurface.withValues(alpha: 0.62),
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+        const Spacer(),
+      ],
     );
   }
 
@@ -238,7 +477,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
   ///
   /// Shared by Stage 1, Stage 2, and terminal states so the calm circle +
   /// dialogue composition never flips to the old headline surface.
-  Widget _buildTutorSurface() {
+  Widget _buildTutorSurface(TutorSession tutor) {
     return LayoutBuilder(
       builder: (context, constraints) {
         return SingleChildScrollView(
@@ -253,7 +492,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                     width: double.infinity,
                     child: Center(
                       child: TutorPresenceCircle(
-                        state: _tutor.presenceState,
+                        state: tutor.presenceState,
                         voiceLevel: _controller.voiceActivity,
                       ),
                     ),
@@ -269,7 +508,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
                   const SizedBox(height: DesignTokens.spaceMd),
                 ] else
                   const SizedBox(height: DesignTokens.spaceLg),
-                _TutorDialogueContent(tutor: _tutor),
+                _TutorDialogueContent(tutor: tutor),
               ],
             ),
           ),
@@ -278,14 +517,14 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     );
   }
 
-  List<Widget> _buildActions() {
+  List<Widget> _buildActions(TutorSession tutor) {
     // Terminal CTAs stay available even if completion speech is finishing.
-    if (_tutor.showPlayMyShruti) {
+    if (tutor.showPlayMyShruti) {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-play-my-shruti'),
           label: 'Play My Shruti',
-          onPressed: _tutor.isSpeaking
+          onPressed: tutor.isSpeaking
               ? null
               : () {
                   final pitch = _controller.referencePitch;
@@ -297,97 +536,95 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
           key: const ValueKey<String>('assist-try-again'),
           label: 'Try Again',
           primary: false,
-          onPressed: _tutor.isSpeaking ? null : _tutor.tryAgain,
+          onPressed: tutor.isSpeaking ? null : tutor.tryAgain,
         ),
       ];
     }
 
-    if (_tutor.showSessionStopped) {
+    if (tutor.showSessionStopped) {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-session-stopped-try-again'),
           label: 'Try Again',
-          onPressed: _tutor.tryAgain,
+          onPressed: tutor.tryAgain,
         ),
       ];
     }
 
-    // No in-flow CTAs while Harmony is speaking — same as Stage 1.
-    if (_tutor.isSpeaking) {
+    // Buttons stay hidden until the current line has finished printing.
+    if (tutor.isSpeaking) {
       return const [];
     }
 
-    if (_tutor.showDifferentSoundChoice) {
-      final canAnswer = _tutor.canAnswerDifferentSound;
+    if (tutor.showDifferentSoundChoice) {
+      final canAnswer = tutor.canAnswerDifferentSound;
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-different-sound-yes'),
           label: 'Yes',
-          onPressed: canAnswer ? () => _tutor.answerDifferentSound(true) : null,
+          onPressed: canAnswer ? () => tutor.answerDifferentSound(true) : null,
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
           key: const ValueKey<String>('assist-different-sound-no'),
           label: 'No',
           primary: false,
-          onPressed: canAnswer
-              ? () => _tutor.answerDifferentSound(false)
-              : null,
+          onPressed: canAnswer ? () => tutor.answerDifferentSound(false) : null,
         ),
       ];
     }
 
-    if (_tutor.showYesNoFallback) {
+    if (tutor.showYesNoFallback) {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-lower-audible-yes'),
           label: TutorScripts.ctaHeardClearly,
-          onPressed: () => _tutor.answerLowerAudibility(true),
+          onPressed: () => tutor.answerLowerAudibility(true),
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
           key: const ValueKey<String>('assist-lower-too-low'),
           label: TutorScripts.ctaHardToHear,
           primary: false,
-          onPressed: () => _tutor.answerLowerAudibility(false),
+          onPressed: () => tutor.answerLowerAudibility(false),
         ),
       ];
     }
 
-    if (_tutor.showComfortFallback) {
+    if (tutor.showComfortFallback) {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-upper-comfortable'),
           label: TutorScripts.ctaComfortable,
-          onPressed: () => _tutor.answerUpperComfort(true),
+          onPressed: () => tutor.answerUpperComfort(true),
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
           key: const ValueKey<String>('assist-upper-strained'),
           label: TutorScripts.ctaNotComfortable,
           primary: false,
-          onPressed: () => _tutor.answerUpperComfort(false),
+          onPressed: () => tutor.answerUpperComfort(false),
         ),
       ];
     }
 
-    if (_tutor.showTryAgain) {
+    if (tutor.showTryAgain) {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-unresolved-try-again'),
           label: 'Try Again',
-          onPressed: _tutor.tryAgain,
+          onPressed: tutor.tryAgain,
         ),
       ];
     }
 
-    if (_tutor.showPrimaryAction) {
-      final label = _tutor.primaryActionLabel ?? '';
+    if (tutor.showPrimaryAction) {
+      final label = tutor.primaryActionLabel ?? '';
       return [
         TutorActionButton(
           key: ValueKey<String>('assist-primary-$label'),
           label: label,
-          onPressed: _tutor.continuePrimaryAction,
+          onPressed: tutor.continuePrimaryAction,
         ),
       ];
     }
@@ -432,6 +669,8 @@ class _TutorDialogueContent extends StatelessWidget {
             text: dialogue,
             isSpeaking: tutor.isSpeaking,
             isInstruction: tutor.isDialogueInstruction,
+            holdReveal: tutor.isHoldingTranscript,
+            revealDuration: tutor.transcriptRevealDuration,
           );
 
     // Compact text + two-note cue as one instruction unit (gap is spaceSm only).

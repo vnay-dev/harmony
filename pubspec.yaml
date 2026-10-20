@@ -13,6 +13,8 @@ dependencies:
     sdk: flutter
   audio_session: ^0.2.4
   just_audio: ^0.10.6
+  kittentts:
+    path: ../KittenTTS-flutter
   material_symbols_icons: ^4.2874.0
   pitch_detector_dart: ^0.0.7
   record: ^6.2.1
@@ -30,4 +32,3 @@ flutter:
   assets:
     - assets/audio/pa/
     - assets/audio/pilot/
-    - assets/audio/tutor/

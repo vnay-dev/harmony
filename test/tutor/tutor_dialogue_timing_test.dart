@@ -5,77 +5,58 @@ import 'package:harmony/tutor/tutor_scripts.dart';
 
 void main() {
   group('TutorDialogueTiming', () {
-    test('reveals Stage 1 welcome words across the clip duration', () {
-      final timing = TutorDialogueTiming.forLine(TutorScripts.welcome.first);
+    test('paces a line from its text, not a recording length', () {
+      final line = TutorScripts.welcome.first;
+      final timing = TutorDialogueTiming.forLine(line);
       expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 5062));
+      expect(timing!.duration, TutorDialogueTiming.durationFor(line));
+      expect(timing.duration, isNot(const Duration(milliseconds: 5062)));
       expect(timing.visibleTextAt(Duration.zero), isEmpty);
       expect(
         timing.visibleTextAt(const Duration(milliseconds: 400)),
         isNotEmpty,
       );
-      expect(timing.visibleTextAt(timing.duration), TutorScripts.welcome.first);
+      expect(timing.visibleTextAt(timing.duration), line);
     });
 
     test('keeps spoken instruction text identical to the script line', () {
-      final timing = TutorDialogueTiming.forLine(
-        TutorScripts.firstStepInstruction,
-      );
+      final line = TutorScripts.firstStepInstruction;
+      final timing = TutorDialogueTiming.forLine(line);
       expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 4505));
+      expect(timing!.duration, TutorDialogueTiming.durationFor(line));
+      expect(timing.visibleTextAt(timing.duration), line);
+    });
+
+    test('uses the same text pace for a retry line', () {
+      final line = TutorScripts.startingNoteRetryOnce.first;
+      final timing = TutorDialogueTiming.forLine(line);
+      expect(timing, isNotNull);
+      expect(timing!.duration, TutorDialogueTiming.durationFor(line));
+      expect(timing.visibleTextAt(timing.duration), line);
+    });
+
+    test('bounds short and long lines', () {
       expect(
-        timing.visibleTextAt(timing.duration),
-        TutorScripts.firstStepInstruction,
+        TutorDialogueTiming.durationFor('Hi'),
+        TutorDialogueTiming.minReveal,
+      );
+      final longLine = 'word ' * 400;
+      expect(
+        TutorDialogueTiming.durationFor(longLine),
+        TutorDialogueTiming.maxReveal,
       );
     });
 
-    test('matches retry clip duration so transcript ends with speech', () {
-      final timing = TutorDialogueTiming.forLine(
-        TutorScripts.startingNoteRetryOnce.first,
-      );
-      expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 2601));
-      expect(
-        timing.visibleTextAt(timing.duration),
-        TutorScripts.startingNoteRetryOnce.first,
-      );
-    });
-
-    test('reveals Stage 2 opening words across the clip duration', () {
-      final timing = TutorDialogueTiming.forLine(
+    test('reveals the full line by the end of its text duration', () {
+      for (final line in <String>[
         TutorScripts.startingNoteSuccess.first,
-      );
-      expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 4505));
-      expect(timing.visibleTextAt(Duration.zero), isEmpty);
-      expect(
-        timing.visibleTextAt(timing.duration),
-        TutorScripts.startingNoteSuccess.first,
-      );
-    });
-
-    test('reveals lower-sound listen prompt across the clip duration', () {
-      final timing = TutorDialogueTiming.forLine(
         TutorScripts.lowerSoundListenPrompt,
-      );
-      expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 7663));
-      expect(
-        timing.visibleTextAt(timing.duration),
-        TutorScripts.lowerSoundListenPrompt,
-      );
-    });
-
-    test('reveals first-attempt countdown across the clip duration', () {
-      final timing = TutorDialogueTiming.forLine(
         TutorScripts.countdownFirst.first,
-      );
-      expect(timing, isNotNull);
-      expect(timing!.duration, const Duration(milliseconds: 2136));
-      expect(
-        timing.visibleTextAt(timing.duration),
-        TutorScripts.countdownFirst.first,
-      );
+      ]) {
+        final timing = TutorDialogueTiming.forLine(line)!;
+        expect(timing.duration, TutorDialogueTiming.durationFor(line));
+        expect(timing.visibleTextAt(timing.duration), line);
+      }
     });
   });
 }

@@ -1,22 +1,21 @@
 import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 
-/// Resolves spoken tutor lines to bundled recording ids.
+/// Resolves spoken tutor lines to dialogue / recording ids.
 ///
 /// Playback ids and transcript text both come from [TutorDialogues]. This
 /// catalog does not keep a second wording table — it only looks up the shared
-/// dialogue definition and returns its id / asset path.
+/// dialogue definition and returns its id. Speech is synthesized by Kitten or
+/// HTTP TTS; legacy bundled MP3 paths are no longer used.
 class TutorAudioCatalog {
   const TutorAudioCatalog._();
 
-  static const assetDirectory = 'assets/audio/tutor';
-
-  /// Bundled ids: S01–S53, S60–S76. S54–S58 are reserved / not bundled.
+  /// Valid dialogue ids: S01–S53, S60–S76. S54–S58 are reserved / no speech yet.
   static final RegExp _assetIdPattern = RegExp(
     r'^S(?:0[1-9]|[1-4][0-9]|5[0-3]|6[0-9]|7[0-6])$',
   );
 
-  /// Spoken display label (`C`, `C#`, …) to the name clip.
+  /// Spoken display label (`C`, `C#`, …) to the name clip id.
   static const Map<String, String> shrutiAssetIds = <String, String>{
     'C': 'S40',
     'C#': 'S41',
@@ -35,9 +34,9 @@ class TutorAudioCatalog {
   static final String _completionPrefix =
       '${TutorDialogues.s39.text} Your Shruti is ';
 
-  /// Recordings still needed for [TutorScripts.orientation], in speak order.
+  /// Dialogue ids still needed for [TutorScripts.orientation], in speak order.
   ///
-  /// Not bundled yet: `assets/audio/tutor/S54.mp3` through `S58.mp3`.
+  /// Reserved without speech yet: S54–S58.
   static const List<String> orientationRecordingIds = <String>[
     'S54',
     'S55',
@@ -46,7 +45,7 @@ class TutorAudioCatalog {
     'S58',
   ];
 
-  /// Lines the current session can still request, with no finalized recording.
+  /// Lines the current session can still request, with no finalized dialogue id.
   static final Set<String> linesWithoutRecording = <String>{
     TutorScripts.startingNoteRetryOnce[2],
     TutorScripts.letMeHelpYou,
@@ -94,16 +93,9 @@ class TutorAudioCatalog {
     return TutorDialogues.byText(line.trim());
   }
 
-  /// Bundled path for [assetId], for example `assets/audio/tutor/S01.mp3`.
-  static String assetPath(String assetId) {
-    if (!_assetIdPattern.hasMatch(assetId)) {
-      throw ArgumentError.value(
-        assetId,
-        'assetId',
-        'Expected a bundled tutor recording id (S01–S75).',
-      );
-    }
-    return '$assetDirectory/$assetId.mp3';
+  /// Whether [assetId] is a known tutor dialogue id (S01–S53, S60–S76).
+  static bool isValidAssetId(String assetId) {
+    return _assetIdPattern.hasMatch(assetId);
   }
 
   static List<String>? _completionAssetIds(String line) {
