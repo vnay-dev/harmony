@@ -32,6 +32,9 @@ class FakeTutorSaClipTransport implements TutorClipTransport {
   @override
   Stream<ProcessingState> get processingStateStream => _states.stream;
 
+  @override
+  Duration? get duration => null;
+
   void _setState(ProcessingState state) {
     _state = state;
     _states.add(state);

@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/tutor/tutor_audio_catalog.dart';
@@ -35,7 +33,7 @@ void main() {
       }
     });
 
-    test('audio clip and text belong to the same dialogue definition', () {
+    test('dialogue id and text belong to the same definition', () {
       for (final dialogue in TutorDialogues.withBundledRecording) {
         expect(TutorAudioCatalog.assetIdsForSpokenLine(dialogue.text), <String>[
           dialogue.id,
@@ -44,15 +42,7 @@ void main() {
           TutorAudioCatalog.dialogueForSpokenLine(dialogue.text),
           same(dialogue),
         );
-        expect(
-          TutorAudioCatalog.assetPath(dialogue.id),
-          'assets/audio/tutor/${dialogue.id}.mp3',
-        );
-        expect(
-          File(TutorAudioCatalog.assetPath(dialogue.id)).existsSync(),
-          isTrue,
-          reason: '${dialogue.id} must be bundled on disk',
-        );
+        expect(TutorAudioCatalog.isValidAssetId(dialogue.id), isTrue);
       }
     });
 
@@ -111,8 +101,7 @@ void main() {
         ),
         <String>['S72'],
       );
-      expect(TutorAudioCatalog.assetPath('S72'), 'assets/audio/tutor/S72.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S72')).existsSync(), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S72'), isTrue);
       expect(
         TutorScripts.startingNoteSuccess.first,
         isNot(TutorDialogues.s11.text),
@@ -141,18 +130,14 @@ void main() {
         ),
         <String>['S74'],
       );
-      expect(TutorAudioCatalog.assetPath('S74'), 'assets/audio/tutor/S74.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S74')).existsSync(), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S74'), isTrue);
     });
 
     test('Stage 2 first solo countdown maps onto S75 without again', () {
       expect(TutorDialogues.s75.text, "Let's try singing it in 3...");
       expect(TutorScripts.countdownFirst.first, TutorDialogues.s75.text);
       expect(TutorScripts.countdown.first, TutorDialogues.s07.text);
-      expect(
-        TutorScripts.countdownFirst.first,
-        isNot(contains('again')),
-      );
+      expect(TutorScripts.countdownFirst.first, isNot(contains('again')));
       expect(TutorScripts.countdown.first, contains('again'));
       expect(
         TutorAudioCatalog.assetIdsForSpokenLine(
@@ -160,8 +145,7 @@ void main() {
         ),
         <String>['S75'],
       );
-      expect(TutorAudioCatalog.assetPath('S75'), 'assets/audio/tutor/S75.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S75')).existsSync(), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S75'), isTrue);
     });
 
     test(
@@ -243,12 +227,7 @@ void main() {
         expect(TutorAudioCatalog.assetIdsForSpokenLine(dialogue.text), <String>[
           dialogue.id,
         ]);
-        expect(
-          TutorAudioCatalog.assetPath(
-            dialogue.id,
-          ).endsWith('/${dialogue.id}.mp3'),
-          isTrue,
-        );
+        expect(TutorAudioCatalog.isValidAssetId(dialogue.id), isTrue);
       }
       for (final dialogue in TutorDialogues.stage2Recovery) {
         expect(TutorAudioCatalog.assetIdsForSpokenLine(dialogue.text), <String>[
@@ -309,7 +288,7 @@ void main() {
           final ids = TutorAudioCatalog.assetIdsForSpokenLine(line);
           expect(ids, <String>[dialogue!.id], reason: line);
           // Catalog must not return empty (silent fallback) for a spoken line
-          // that has a bundled recording.
+          // that has a speakable dialogue id.
           expect(ids, isNotEmpty, reason: line);
           expect(dialogue.text, line);
         }

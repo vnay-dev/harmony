@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:harmony/tutor/tutor_voice.dart';
 import 'package:harmony/ui/components/play_pause_button.dart';
 import 'package:harmony/ui/components/shruti_info_sheet.dart';
 import 'package:harmony/ui/screens/assist_mode_screen.dart';
 import 'package:harmony/ui/screens/home_screen.dart';
 
 import '../support/fake_audio_service.dart';
+import '../support/fake_pitch_detection_service.dart';
+import '../support/fake_reference_sound_generator.dart';
 
 void main() {
   testWidgets('info icon opens What is Shruti sheet and dismisses cleanly', (
@@ -52,7 +55,23 @@ void main() {
   ) async {
     final audio = FakeAudioService();
 
-    await tester.pumpWidget(MaterialApp(home: HomeScreen(audioService: audio)));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomeScreen(
+          audioService: audio,
+          // Avoid downloading the Kitten model in widget tests.
+          assistModeBuilder: (_) => AssistModeScreen(
+            detectionService: FakePitchDetectionService(),
+            audioService: FakeAudioService(),
+            referenceSoundGenerator: FakeReferenceSoundGenerator(),
+            tutorVoice: SilentTutorVoice(),
+            autoBegin: false,
+            prepareAudioSession: () async {},
+            wait: (_) async {},
+          ),
+        ),
+      ),
+    );
     // Initial load only — avoid settle after play (ripple loops forever).
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));

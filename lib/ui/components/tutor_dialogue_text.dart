@@ -4,13 +4,18 @@ import 'package:harmony/theme/design_tokens.dart';
 import 'package:harmony/tutor/tutor_compliment.dart';
 import 'package:harmony/tutor/tutor_dialogue_timing.dart';
 
-/// Tutor dialogue that writes progressively in sync with spoken audio timing.
+/// Tutor dialogue that types on with speech.
+///
+/// Bundled clips use a text-length pace. HTTP playback passes [revealDuration]
+/// from the loaded clip and keeps [holdReveal] set until playback starts.
 class TutorDialogueText extends StatefulWidget {
   const TutorDialogueText({
     super.key,
     required this.text,
     this.isSpeaking = false,
     this.isInstruction = false,
+    this.holdReveal = false,
+    this.revealDuration,
   });
 
   final String text;
@@ -18,6 +23,12 @@ class TutorDialogueText extends StatefulWidget {
 
   /// Secondary hint style (e.g. listening prompt) — not spoken dialogue.
   final bool isInstruction;
+
+  /// Keeps the line hidden while audio is still being generated.
+  final bool holdReveal;
+
+  /// Loaded playback length. Null uses the text estimate.
+  final Duration? revealDuration;
 
   @override
   State<TutorDialogueText> createState() => _TutorDialogueTextState();
@@ -42,31 +53,45 @@ class _TutorDialogueTextState extends State<TutorDialogueText>
     super.initState();
     _reveal = AnimationController(vsync: this);
     _reveal.addListener(_onTick);
-    _startReveal(widget.text, animate: widget.isSpeaking);
+    _startReveal(widget.text, animate: widget.isSpeaking && !widget.holdReveal);
   }
 
   @override
   void didUpdateWidget(covariant TutorDialogueText oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.text != widget.text) {
-      _invalidateStyleCache();
-      _startReveal(widget.text, animate: widget.isSpeaking);
-      return;
-    }
     if (oldWidget.isInstruction != widget.isInstruction) {
       _invalidateStyleCache();
       if (mounted) {
         setState(() {});
       }
     }
-    if (oldWidget.isSpeaking != widget.isSpeaking) {
-      if (widget.isSpeaking) {
-        if (_cursor < widget.text.characters.length) {
-          _startReveal(widget.text, animate: true);
-        }
-      } else {
+    final textChanged = oldWidget.text != widget.text;
+    if (textChanged) {
+      _invalidateStyleCache();
+      _startReveal(
+        widget.text,
+        animate: widget.isSpeaking && !widget.holdReveal,
+      );
+      return;
+    }
+    if (widget.holdReveal && widget.isSpeaking) {
+      if (!oldWidget.holdReveal || !oldWidget.isSpeaking) {
+        _startReveal(widget.text, animate: false);
+      }
+      return;
+    }
+    if (!widget.isSpeaking) {
+      if (oldWidget.isSpeaking) {
         _finishReveal();
       }
+      return;
+    }
+    final releasedHold = oldWidget.holdReveal;
+    final durationChanged = oldWidget.revealDuration != widget.revealDuration;
+    final resumed =
+        !oldWidget.isSpeaking && _cursor < widget.text.characters.length;
+    if (releasedHold || durationChanged || resumed) {
+      _startReveal(widget.text, animate: true);
     }
   }
 
@@ -78,10 +103,30 @@ class _TutorDialogueTextState extends State<TutorDialogueText>
     _cachedIsInstruction = null;
   }
 
+  TutorLineTiming? _timingFor(String text) {
+    final override = widget.revealDuration;
+    if (override != null && override > Duration.zero) {
+      final trimmed = text.trim();
+      if (trimmed.isEmpty) {
+        return null;
+      }
+      return TutorLineTiming.proportional(trimmed, override);
+    }
+    return TutorDialogueTiming.forLine(text);
+  }
+
   void _startReveal(String text, {required bool animate}) {
     _reveal.stop();
-    _timing = TutorDialogueTiming.forLine(text);
+    _timing = _timingFor(text);
     final length = text.characters.length;
+
+    if (widget.holdReveal && widget.isSpeaking) {
+      _cursor = 0;
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
 
     if (!animate || text.isEmpty || _timing == null) {
       _cursor = length.toDouble();

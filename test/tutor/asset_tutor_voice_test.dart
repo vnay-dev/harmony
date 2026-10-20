@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:just_audio/just_audio.dart';
@@ -51,9 +50,7 @@ void main() {
         <String>['S07'],
       );
       expect(
-        TutorAudioCatalog.assetIdsForSpokenLine(
-          TutorScripts.countdownFirst[0],
-        ),
+        TutorAudioCatalog.assetIdsForSpokenLine(TutorScripts.countdownFirst[0]),
         <String>['S75'],
       );
       expect(
@@ -282,20 +279,8 @@ void main() {
         ),
         <String>['S61'],
       );
-      expect(TutorAudioCatalog.assetPath('S70'), 'assets/audio/tutor/S70.mp3');
-      expect(TutorAudioCatalog.assetPath('S61'), 'assets/audio/tutor/S61.mp3');
-      for (final id in <String>['S70', 'S61']) {
-        expect(
-          File(TutorAudioCatalog.assetPath(id)).existsSync(),
-          isTrue,
-          reason: '$id must be bundled on disk',
-        );
-      }
-      // Guard: a prior S61.mp3 was the retired "Lovely. Let's try this one."
-      // clip (35988 bytes / ~2.18s). Listen-again must stay the longer take.
-      final s61Bytes = File(TutorAudioCatalog.assetPath('S61')).lengthSync();
-      expect(s61Bytes, isNot(35988));
-      expect(s61Bytes, greaterThan(50000));
+      expect(TutorAudioCatalog.isValidAssetId('S70'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S61'), isTrue);
       expect(
         TutorScripts.startingNoteGuided,
         isNot(contains("That's okay. Let's try again.")),
@@ -317,12 +302,7 @@ void main() {
         ),
         <String>['S72'],
       );
-      expect(TutorAudioCatalog.assetPath('S72'), 'assets/audio/tutor/S72.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S72')).existsSync(), isTrue);
-      expect(
-        File(TutorAudioCatalog.assetPath('S72')).lengthSync(),
-        greaterThan(1000),
-      );
+      expect(TutorAudioCatalog.isValidAssetId('S72'), isTrue);
       for (final id in <String>['S59', 'S60', 'S61', 'S62', 'S63', 'S11']) {
         expect(
           TutorAudioCatalog.assetIdsForSpokenLine(
@@ -360,19 +340,19 @@ void main() {
         TutorAudioCatalog.assetIdsForSpokenLine(TutorScripts.stepBackToVoice),
         <String>['S63'],
       );
-      expect(TutorAudioCatalog.assetPath('S70'), 'assets/audio/tutor/S70.mp3');
-      expect(TutorAudioCatalog.assetPath('S71'), 'assets/audio/tutor/S71.mp3');
-      expect(TutorAudioCatalog.assetPath('S73'), 'assets/audio/tutor/S73.mp3');
-      expect(TutorAudioCatalog.assetPath('S63'), 'assets/audio/tutor/S63.mp3');
+      expect(TutorAudioCatalog.isValidAssetId('S70'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S71'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S73'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S63'), isTrue);
     });
 
-    test('maps an asset id and its bundled path', () {
+    test('maps a bare asset id', () {
       expect(TutorAudioCatalog.assetIdsForSpokenLine('S01'), <String>['S01']);
-      expect(TutorAudioCatalog.assetPath('S01'), 'assets/audio/tutor/S01.mp3');
-      expect(TutorAudioCatalog.assetPath('S53'), 'assets/audio/tutor/S53.mp3');
+      expect(TutorAudioCatalog.isValidAssetId('S01'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S53'), isTrue);
     });
 
-    test('orientation lines are not bundled yet', () {
+    test('orientation lines are not speakable yet', () {
       expect(TutorAudioCatalog.orientationRecordingIds, <String>[
         'S54',
         'S55',
@@ -414,138 +394,12 @@ void main() {
         ),
         throwsStateError,
       );
-      expect(() => TutorAudioCatalog.assetPath('S00'), throwsArgumentError);
-      expect(() => TutorAudioCatalog.assetPath('S54'), throwsArgumentError);
-      expect(() => TutorAudioCatalog.assetPath('S77'), throwsArgumentError);
-      expect(TutorAudioCatalog.assetPath('S74'), 'assets/audio/tutor/S74.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S74')).existsSync(), isTrue);
-      expect(TutorAudioCatalog.assetPath('S75'), 'assets/audio/tutor/S75.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S75')).existsSync(), isTrue);
-      expect(TutorAudioCatalog.assetPath('S76'), 'assets/audio/tutor/S76.mp3');
-      expect(File(TutorAudioCatalog.assetPath('S76')).existsSync(), isTrue);
-    });
-  });
-
-  group('AssetTutorVoice', () {
-    late _FakeTutorClipPlayer clips;
-    late AssetTutorVoice voice;
-
-    setUp(() {
-      clips = _FakeTutorClipPlayer();
-      voice = AssetTutorVoice(clips: clips);
-    });
-
-    test('waits until the clip finishes', () async {
-      var completed = false;
-      final speak = voice
-          .speak(TutorScripts.welcome.first)
-          .whenComplete(() => completed = true);
-
-      await Future<void>.delayed(Duration.zero);
-      expect(completed, isFalse);
-      expect(clips.played, <String>['assets/audio/tutor/S64.mp3']);
-
-      clips.finishCurrent();
-      await speak;
-      expect(completed, isTrue);
-    });
-
-    test('plays completion clips in order', () async {
-      final speak = voice.speak(TutorScripts.completion('C#'));
-
-      await Future<void>.delayed(Duration.zero);
-      expect(clips.played, <String>['assets/audio/tutor/S39.mp3']);
-
-      clips.finishCurrent();
-      await Future<void>.delayed(Duration.zero);
-      expect(clips.played, <String>[
-        'assets/audio/tutor/S39.mp3',
-        'assets/audio/tutor/S41.mp3',
-      ]);
-
-      clips.finishCurrent();
-      await speak;
-    });
-
-    test('stop cancels the current clip and does not start the next', () async {
-      final speak = voice.speak(TutorScripts.completion('C'));
-      await Future<void>.delayed(Duration.zero);
-      expect(clips.played, <String>['assets/audio/tutor/S39.mp3']);
-
-      await voice.stop();
-      await speak;
-
-      expect(clips.played, <String>['assets/audio/tutor/S39.mp3']);
-      expect(clips.stopCount, greaterThan(0));
-    });
-
-    test('stop ends the current clip so a later line can play', () async {
-      final first = voice.speak(TutorScripts.welcome.first);
-      await Future<void>.delayed(Duration.zero);
-      await voice.stop();
-      await first;
-
-      final second = voice.speak(TutorScripts.firstStepListen);
-      await Future<void>.delayed(Duration.zero);
-      expect(clips.played, <String>[
-        'assets/audio/tutor/S64.mp3',
-        'assets/audio/tutor/S65.mp3',
-      ]);
-      clips.finishCurrent();
-      await second;
-    });
-
-    test('awaits interrupt before starting the next clip', () async {
-      final events = <String>[];
-      final tracking = _OrderingClipPlayer(events);
-      final orderedVoice = AssetTutorVoice(clips: tracking);
-
-      final first = orderedVoice.playAssets(const <String>['S70']);
-      await Future<void>.delayed(Duration.zero);
-      expect(events, <String>['interrupt', 'play:S70']);
-
-      // Start S61 while S70 is still "playing" — interrupt must finish before play.
-      // Hard stop is avoided so ExoPlayer is not Released between dialogue lines.
-      final second = orderedVoice.playAssets(const <String>['S61']);
-      await Future<void>.delayed(Duration.zero);
-      expect(events, <String>[
-        'interrupt',
-        'play:S70',
-        'interrupt',
-        'play:S61',
-      ]);
-
-      tracking.finishCurrent();
-      await first;
-      tracking.finishCurrent();
-      await second;
-      await orderedVoice.dispose();
-    });
-
-    test('plays a bare asset id', () async {
-      final speak = voice.speak('S19');
-      await Future<void>.delayed(Duration.zero);
-      expect(clips.played, <String>['assets/audio/tutor/S19.mp3']);
-      clips.finishCurrent();
-      await speak;
-    });
-
-    test('skips lines that have no recording', () async {
-      await voice.speak(TutorScripts.letMeHelpYou);
-      expect(clips.played, isEmpty);
-    });
-
-    test('dispose stops playback and releases the player', () async {
-      final speak = voice.speak(TutorScripts.welcome.first);
-      await Future<void>.delayed(Duration.zero);
-
-      await voice.dispose();
-      await speak;
-
-      expect(clips.disposed, isTrue);
-      expect(clips.stopCount, greaterThan(0));
-      await voice.speak(TutorScripts.firstStepListen);
-      expect(clips.played, <String>['assets/audio/tutor/S64.mp3']);
+      expect(TutorAudioCatalog.isValidAssetId('S00'), isFalse);
+      expect(TutorAudioCatalog.isValidAssetId('S54'), isFalse);
+      expect(TutorAudioCatalog.isValidAssetId('S77'), isFalse);
+      expect(TutorAudioCatalog.isValidAssetId('S74'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S75'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S76'), isTrue);
     });
   });
 
@@ -559,24 +413,21 @@ void main() {
     });
 
     test('consecutive clips replace the source without stopping', () async {
-      final first = player.playToEnd('assets/audio/tutor/S34.mp3');
+      final first = player.playToEnd('clip-a');
       await Future<void>.delayed(Duration.zero);
       expect(transport.stopCount, 0);
       expect(transport.pauseCount, 0);
-      expect(transport.loaded, <String>['assets/audio/tutor/S34.mp3']);
+      expect(transport.loaded, <String>['clip-a']);
 
       transport.finish();
       await first;
       expect(transport.stopCount, 0);
 
-      final second = player.playToEnd('assets/audio/tutor/S35.mp3');
+      final second = player.playToEnd('clip-b');
       await Future<void>.delayed(Duration.zero);
       expect(transport.stopCount, 0);
       expect(transport.pauseCount, 1);
-      expect(transport.loaded, <String>[
-        'assets/audio/tutor/S34.mp3',
-        'assets/audio/tutor/S35.mp3',
-      ]);
+      expect(transport.loaded, <String>['clip-a', 'clip-b']);
 
       transport.finish();
       await second;
@@ -584,130 +435,51 @@ void main() {
     });
 
     test('playing the same clip again does not stop the player', () async {
-      final first = player.playToEnd('assets/audio/tutor/S35.mp3');
+      final first = player.playToEnd('clip-b');
       await Future<void>.delayed(Duration.zero);
       transport.finish();
       await first;
 
-      final second = player.playToEnd('assets/audio/tutor/S35.mp3');
+      final second = player.playToEnd('clip-b');
       await Future<void>.delayed(Duration.zero);
       expect(transport.stopCount, 0);
       expect(transport.pauseCount, 1);
-      expect(transport.loaded, <String>[
-        'assets/audio/tutor/S35.mp3',
-        'assets/audio/tutor/S35.mp3',
-      ]);
+      expect(transport.loaded, <String>['clip-b', 'clip-b']);
       transport.finish();
       await second;
     });
 
     test('stop still cancels the clip in progress', () async {
-      final playing = player.playToEnd('assets/audio/tutor/S34.mp3');
+      final playing = player.playToEnd('clip-a');
       await Future<void>.delayed(Duration.zero);
       await player.stop();
       await playing;
       expect(transport.stopCount, 1);
 
-      final next = player.playToEnd('assets/audio/tutor/S35.mp3');
+      final next = player.playToEnd('clip-b');
       await Future<void>.delayed(Duration.zero);
-      expect(transport.loaded, contains('assets/audio/tutor/S35.mp3'));
+      expect(transport.loaded, contains('clip-b'));
       transport.finish();
       await next;
+    });
+
+    test('file playback loads a local path without stopping', () async {
+      final playing = player.playFileToEnd(r'C:\tmp\tutor-line.wav');
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.loaded, isEmpty);
+      expect(transport.loadedFiles, <String>[r'C:\tmp\tutor-line.wav']);
+      expect(transport.stopCount, 0);
+
+      transport.finish();
+      await playing;
+      expect(transport.stopCount, 0);
     });
   });
 }
 
-class _FakeTutorClipPlayer implements TutorClipPlayer {
-  final List<String> played = <String>[];
-  int stopCount = 0;
-  int interruptCount = 0;
-  bool disposed = false;
-  Completer<void>? _pending;
-
-  void finishCurrent() {
-    final pending = _pending;
-    _pending = null;
-    if (pending != null && !pending.isCompleted) {
-      pending.complete();
-    }
-  }
-
-  @override
-  Future<void> playToEnd(String assetPath, {void Function()? onStarted}) async {
-    if (disposed) {
-      return;
-    }
-    played.add(assetPath);
-    onStarted?.call();
-    final pending = Completer<void>();
-    _pending = pending;
-    await pending.future;
-  }
-
-  @override
-  Future<void> interrupt() async {
-    interruptCount += 1;
-    finishCurrent();
-  }
-
-  @override
-  Future<void> stop() async {
-    stopCount += 1;
-    finishCurrent();
-  }
-
-  @override
-  Future<void> dispose() async {
-    disposed = true;
-    await stop();
-  }
-}
-
-/// Records interrupt/play ordering for race-regression coverage.
-class _OrderingClipPlayer implements TutorClipPlayer {
-  _OrderingClipPlayer(this.events);
-
-  final List<String> events;
-  Completer<void>? _pending;
-
-  void finishCurrent() {
-    final pending = _pending;
-    _pending = null;
-    if (pending != null && !pending.isCompleted) {
-      pending.complete();
-    }
-  }
-
-  @override
-  Future<void> playToEnd(String assetPath, {void Function()? onStarted}) async {
-    final id = assetPath.split('/').last.replaceAll('.mp3', '');
-    events.add('play:$id');
-    onStarted?.call();
-    final pending = Completer<void>();
-    _pending = pending;
-    await pending.future;
-  }
-
-  @override
-  Future<void> interrupt() async {
-    events.add('interrupt');
-    finishCurrent();
-  }
-
-  @override
-  Future<void> stop() async {
-    events.add('stop');
-    finishCurrent();
-  }
-
-  @override
-  Future<void> dispose() async {
-    await stop();
-  }
-}
-
 class _RecordingTransport implements TutorClipTransport {
   final List<String> loaded = <String>[];
+  final List<String> loadedFiles = <String>[];
   int pauseCount = 0;
   int stopCount = 0;
   ProcessingState _state = ProcessingState.idle;
@@ -737,6 +509,9 @@ class _RecordingTransport implements TutorClipTransport {
   Stream<ProcessingState> get processingStateStream => _states.stream;
 
   @override
+  Duration? get duration => null;
+
+  @override
   Future<void> pause() async {
     pauseCount += 1;
     _playing = false;
@@ -752,7 +527,7 @@ class _RecordingTransport implements TutorClipTransport {
 
   @override
   Future<void> loadFile(String filePath, {bool loop = false}) async {
-    loaded.add(filePath);
+    loadedFiles.add(filePath);
     _state = ProcessingState.ready;
     _states.add(_state);
   }

@@ -2,7 +2,7 @@
 
 Source of truth: the current Tutor / Assist Mode implementation on this branch.
 
-Spoken text is produced only by `TutorSession` passing strings into `TutorVoiceCoordinator`, which calls `TutorVoice.speak`. The running app uses `FlutterTutorVoice` (`flutter_tts`). There are no localization files.
+Spoken text is produced only by `TutorSession` passing strings into `TutorVoiceCoordinator`, which calls `TutorVoice.speak` / `playAssets`. The running app defaults to on-device KittenTTS (Micro model, Luna voice). There are no localization files and no bundled tutor MP3 assets.
 
 The phrases "Get ready." and "Go." are not present in the current source. Solo countdown speech is "Let's try singing it again in 3...", "2...", and "1...", including the first starting-note attempt.
 
@@ -67,8 +67,8 @@ On-screen headlines, support text, buttons, and `AssistModeController.errorMessa
 - Exact currently spoken form: `Wonderful. We found a comfortable Shruti for you. Your Shruti is {Pitch.label}.`
 - Dynamic variable: `shrutiLabel`, supplied only as `_engine.referencePitch.label`
 - Possible values: `C`, `C#`, `D`, `D#`, `E`, `F`, `F#`, `G`, `G#`, `A`, `A#`, `B`
-- Number of audio files required: 12
-- Current selection logic: `TutorScripts.completion` interpolates the label. The only call site is `TutorSession._processEnginePhase` when the phase is `AssistUiPhase.completed`. `Pitch` is a 12-value enum; each value's `label` is the string above. The source text contains `#`, not the word "sharp". How device TTS pronounces `#` is not defined in this codebase.
+- Number of spoken variants: 12 (one synthesized line per pitch label)
+- Current selection logic: `TutorScripts.completion` interpolates the label. The only call site is `TutorSession._processEnginePhase` when the phase is `AssistUiPhase.completed`. `Pitch` is a 12-value enum; each value's `label` is the string above. The source text contains `#`, not the word "sharp". How KittenTTS pronounces `#` is not defined in this codebase.
 - Relevant source: `lib/tutor/tutor_scripts.dart` `TutorScripts.completion`; `lib/tutor/tutor_session.dart` `TutorSession._processEnginePhase`; `lib/models/pitch.dart` `Pitch.label`
 - Example outputs:
   - Wonderful. We found a comfortable Shruti for you. Your Shruti is C.
@@ -149,32 +149,33 @@ These are separate lines. Do not merge them.
 
 ## TTS service / class
 
-- `TutorVoice` (`lib/tutor/tutor_voice.dart`) — `speak`, `stop`, `dispose`.
-- `FlutterTutorVoice` (`lib/tutor/flutter_tutor_voice.dart`) — the only real speaker. Uses `package:flutter_tts` `FlutterTts`.
+- `TutorVoice` (`lib/tutor/tutor_voice.dart`) — `speak`, `playAssets`, `stop`, `dispose`.
+- `KittenTutorVoice` (`lib/tutor/kitten_tutor_voice.dart`) — the default speaker. Synthesizes WAV on-device with KittenTTS (Micro + Luna), then plays through `JustAudioTutorClipPlayer`.
+- `HttpTutorVoice` (`lib/tutor/http_tutor_voice.dart`) — optional debug speaker. Requests WAV from a local HTTP TTS server. Selected via `useHttpTutorVoice` or debug `--dart-define=USE_HTTP_TUTOR_VOICE=true`. Takes precedence over Kitten when enabled.
 - `SilentTutorVoice` — no-op implementation. Tests and an optional screen injection use it. It does not speak.
-- `TutorVoiceCoordinator` (`lib/tutor/tutor_voice_coordinator.dart`) — the only object `TutorSession` calls. It trims text, skips empty strings, records a spoken log, and calls `TutorVoice.speak`.
+- `TutorVoiceCoordinator` (`lib/tutor/tutor_voice_coordinator.dart`) — the only object `TutorSession` calls. It trims text, skips empty strings, records a spoken log, resolves dialogue ids, and calls `TutorVoice.speak` / `playAssets`.
+- `KittenTtsBootstrap` (`lib/tutor/kitten_tts_bootstrap.dart`) — downloads or loads the cached Kitten Micro model, reports progress, and supports retry before the tutor session starts.
 
-No other class calls `FlutterTts` or `speak`.
+Dialogue ids and wording come from `TutorDialogues` / `TutorScripts`. There are no bundled tutor MP3 files under `assets/audio/tutor/`.
 
 ## Initialization
 
-`AssistModeScreen` constructs `TutorSession` with `FlutterTutorVoice()` unless a test injects another `TutorVoice`.
+`AssistModeScreen` defaults to Kitten. When no `TutorVoice` is injected and HTTP is not selected:
 
-`FlutterTutorVoice` does not configure TTS in its constructor. On the first non-empty `speak` it calls:
+1. `KittenTtsBootstrap.ensureReady` runs (first-run download or cache reuse).
+2. The screen shows loading / progress feedback while the model initializes.
+3. On failure, the screen shows an error and a Retry control (`bootstrap.retry`).
+4. When ready, `AssistModeScreen` builds `KittenTutorVoice` from the bootstrap synthesizer and starts `TutorSession`.
 
-- `setSpeechRate(0.45)`
-- `setPitch(1.0)`
-- `awaitSpeakCompletion(true)`
-
-Volume, voice, and locale are not set in this codebase.
+HTTP debug mode skips Kitten bootstrap and constructs `HttpTutorVoice()` immediately. Tests may inject another `TutorVoice` or a fake bootstrap so no model is downloaded.
 
 ## How text reaches TTS
 
-1. `TutorScripts` holds the sentences.
+1. `TutorScripts` / `TutorDialogues` hold the sentences and dialogue ids.
 2. `TutorSession` chooses a sentence or list from the script and the engine state.
-3. `speakOnce` or `speakAll` on `TutorVoiceCoordinator` runs.
+3. `speakOnce`, `speakAll`, or `speakDialogue(s)` on `TutorVoiceCoordinator` runs.
 4. `speakAll` speaks each line in order. With an event-id prefix, each line goes through `speakOnce`.
-5. `FlutterTutorVoice.speak` trims, stops any current utterance, then calls `_tts.speak`.
+5. Matched dialogues call `playAssets` with the dialogue id; the voice synthesizes that text and plays the WAV. Unmapped text uses `speak`.
 
 `speakOnce` remembers the event id for the session. A repeated id does not speak again until `resetEventKeys`. Welcome, discovery, questions, and acknowledgments use ids that suppress a second play in the same session. Countdown, retry, and reference lines include epoch, round, point, or failure count, so those can repeat.
 
@@ -182,7 +183,7 @@ Volume, voice, and locale are not set in this codebase.
 
 ## Speech completion
 
-`awaitSpeakCompletion(true)` makes `FlutterTts.speak` complete when the utterance finishes.
+Kitten and HTTP set `synchronizesTranscript` so the typewriter waits for playback start and can follow the loaded clip duration. Playback completes when the WAV finishes or is cancelled. A synthesis or playback failure falls back to text-only for later lines in that session.
 
 The coordinator then waits, unless cancelled:
 
@@ -193,7 +194,7 @@ The coordinator then waits, unless cancelled:
 
 ## Speech stopping
 
-- Each new `speak` calls `_tts.stop()` first.
+- Each new utterance soft-interrupts the current clip before the next synthesis / play.
 - `TutorVoiceCoordinator.cancelSpeech` bumps an epoch, sets cancelled, and stops the voice. In-flight lines return without continuing the list.
 - `TutorSession.stop` cancels speech, stops the recognizer, and does not speak a stop line.
 - `beginReferenceAudio` stops in-progress speech and blocks new speech until `endReferenceAudio`.
@@ -239,12 +240,12 @@ Speech recognition (`SpeechToTextTutorRecognizer`) listens. It does not speak. I
 
 | Setting | Value |
 |---------|--------|
-| Speech rate | 0.45 |
-| Pitch | 1.0 |
-| Await completion | true |
-| Volume | not set |
-| Voice | not set |
-| Locale / language | not set |
+| Engine | KittenTTS (default) |
+| Model | `micro` |
+| Voice | `luna` |
+| Speed | 1.1 |
+| Analytics | false |
+| HTTP debug override | `USE_HTTP_TUTOR_VOICE` / `useHttpTutorVoice` (takes precedence over Kitten) |
 
 ---
 
@@ -397,99 +398,38 @@ Countdown values outside 1–3 are ignored. A countdown step value already emitt
 
 ---
 
-# Potential Local Audio Asset Structure
+# Tutor Audio Delivery
 
-Proposal only. These directories are not part of the app.
+Tutor speech is synthesized at runtime. There is no `assets/audio/tutor/` tree and no bundled tutor MP3 / WAV set for these lines.
 
-```text
-assets/audio/tutor/
-  welcome/
-    t01_hi_help_find_shruti.wav
-    t02_no_need_to_know_singing.wav
-    t03_follow_my_voice.wav
-  discovery/
-    t04_begin_gently.wav
-    t05_sing_or_hum_comfortable.wav
-    t06_keep_same_sound.wav
-  countdown/
-    t07_try_singing_again_in_3.wav
-    t08_2.wav
-    t09_1.wav
-    t10_sing_together_in_3.wav
-  starting_note/
-    t11_try_once_more.wav
-    t12_steady_comfortable_sound.wav
-    t13_let_you_know_when_to_begin.wav
-    t14_help_you_this_time.wav
-    t15_listen_first.wav
-    t16_make_this_easier.wav
-    t17_listen_once_more.wav
-    t24_beautiful_stop_there.wav
-    t25_find_comfortable_range.wav
-  reference/
-    t18_slightly_lower_sound.wav
-    t19_one_in_the_middle.wav
-    t20_slightly_higher_sound.wav
-    t21_a_little_higher.wav
-    t22_a_little_lower.wav
-    t23_now_try_that_sound.wav
-  questions/
-    t26_hear_that_clearly.wav
-    t27_how_did_that_feel.wav
-    t28_good.wav
-    t29_try_a_little_higher.wav
-    t30_thats_okay.wav
-    t31_didnt_catch_that.wav
-    t32_say_yes_or_no.wav
-    t33_say_comfortable_or_not.wav
-  assisted/
-    t34_practice_together.wav
-    t35_sing_along_with_me.wav
-    t36_practice_once_more.wav
-    u01_youre_ready.wav
-    u02_try_on_your_own.wav
-    u03_let_me_help_you.wav
-  completion/
-    t37_your_shruti_c.wav
-    t37_your_shruti_c_sharp.wav
-    t37_your_shruti_d.wav
-    t37_your_shruti_d_sharp.wav
-    t37_your_shruti_e.wav
-    t37_your_shruti_f.wav
-    t37_your_shruti_f_sharp.wav
-    t37_your_shruti_g.wav
-    t37_your_shruti_g_sharp.wav
-    t37_your_shruti_a.wav
-    t37_your_shruti_a_sharp.wav
-    t37_your_shruti_b.wav
-  unresolved/
-    t38_couldnt_find_shruti.wav
-    t39_try_again_whenever.wav
-```
+- Default: Kitten Micro + Luna on-device via `KittenTtsBootstrap` → `KittenTutorVoice`.
+- Debug: `HttpTutorVoice` when HTTP is enabled; it takes precedence over Kitten.
+- Shruti drone samples under `assets/audio/pa/` and `assets/audio/pilot/` are unrelated to tutor dialogue.
 
-U01–U03 are optional until those handlers are actually called. One file can cover each exact duplicate (T08, T09, T11, T15, T17, T28, T31).
-
-Playback will need the current pauses and the countdown's parallel 1 second steps. Replacing TTS does not by itself preserve that timing.
+Playback still needs the current pauses and the countdown's parallel 1 second steps. Changing the voice implementation does not by itself preserve that timing — `TutorVoiceCoordinator` and `TutorTimingConfig` own it.
 
 ---
 
-# Local Audio Conversion Summary
+# Spoken Dialogue Summary
 
 1. Total unique spoken dialogue items in the running flow: **39** (T01–T39).
-2. Total static audio files required for that flow: **38** (T01–T36 and T38–T39).
-3. Total finite-dynamic variants required: **12** (T37, one file per pitch label).
+2. Total static spoken lines in that flow: **38** (T01–T36 and T38–T39).
+3. Total finite-dynamic variants: **12** (T37, one synthesized line per pitch label).
 4. Total truly dynamic messages: **0**.
-5. Total estimated audio assets after expanding finite dynamic dialogue: **50** (38 static + 12 Shruti lines).
-6. Dialogue generated outside the main Tutor / TTS path: **no**. Every spoken line goes through `TutorSession` → `TutorVoiceCoordinator` → `FlutterTutorVoice`. Three further static lines (U01, U02, U03) are implemented on tutor callbacks or branches the current engine does not enter. Adding them later would make 53 assets. `AssistModeController` also stores fallback strings that are not spoken and are not shown on the Assist screen.
-7. Whether any dialogue appears to require runtime TTS: **no.** Every reachable sentence is static, or one of 12 known Shruti sentences. Nothing is built from free-form runtime text.
-8. Files and classes most likely to change when TTS is replaced with local audio:
-   - `lib/tutor/flutter_tutor_voice.dart` — `FlutterTutorVoice`
+5. Total distinct spoken variants after expanding finite dynamic dialogue: **50** (38 static + 12 Shruti lines).
+6. Dialogue generated outside the main Tutor / TTS path: **no**. Every spoken line goes through `TutorSession` → `TutorVoiceCoordinator` → `KittenTutorVoice` (or `HttpTutorVoice` when HTTP debug is enabled). Three further static lines (U01, U02, U03) are implemented on tutor callbacks or branches the current engine does not enter. `AssistModeController` also stores fallback strings that are not spoken and are not shown on the Assist screen.
+7. Runtime TTS: **yes.** Kitten (default) and optional HTTP synthesize each line from the script text. Every reachable sentence is still a fixed string, or one of 12 known Shruti sentences — nothing is built from free-form user text.
+8. Files and classes that own tutor speech today:
+   - `lib/tutor/kitten_tutor_voice.dart` — `KittenTutorVoice` (default on-device speech)
+   - `lib/tutor/kitten_tts_bootstrap.dart` — `KittenTtsBootstrap` (model download / cache, progress, retry)
+   - `lib/tutor/http_tutor_voice.dart` — `HttpTutorVoice` (debug override)
    - `lib/tutor/tutor_voice.dart` — `TutorVoice`
    - `lib/tutor/tutor_voice_coordinator.dart` — `TutorVoiceCoordinator` (completion, pauses, reference lock, `speakOnce`)
    - `lib/tutor/tutor_session.dart` — `TutorSession` (where each line is chosen and awaited)
    - `lib/tutor/tutor_scripts.dart` — `TutorScripts` (the sentence list and `completion`)
-   - `lib/ui/screens/assist_mode_screen.dart` — `AssistModeScreen` (constructs `FlutterTutorVoice`)
-   - `lib/tutor/tutor_timing.dart` — `TutorTimingConfig` (pauses that must remain if assets replace TTS)
+   - `lib/tutor/tutor_dialogue.dart` — `TutorDialogues` (id ↔ text)
+   - `lib/ui/screens/assist_mode_screen.dart` — `AssistModeScreen` (bootstrap gate; constructs Kitten or HTTP voice)
+   - `lib/tutor/tutor_timing.dart` — `TutorTimingConfig` (pauses that must remain across voice backends)
    - `lib/state/assist_mode_controller.dart` — `AssistModeController` (awaits the speech hooks and runs countdown timing; not a second speaker)
 
 ## On-screen text that is not spoken
@@ -522,7 +462,7 @@ Headlines and support text in `TutorSession.headline` / `supportText`, rendered 
 
 Buttons, not spoken: Yes, No, Comfortable, Not comfortable, Stop, Try Again, Play My Shruti. The app bar title "Find your Shruti" is not spoken.
 
-`AssistModeController.errorMessage` is set and never passed to TTS. `AssistModeScreen` does not display it either.
+`AssistModeController.errorMessage` is set and never passed to the tutor voice. `AssistModeScreen` does not display it either.
 
 | Stored text | When it is assigned |
 |-------------|---------------------|
@@ -530,7 +470,7 @@ Buttons, not spoken: Yes, No, Comfortable, Not comfortable, Stop, Try Again, Pla
 | That's okay. Let's try that once more. | Pitch-detection start failure, reference playback failure, assisted reference failure, or a detection-stream error. |
 | That's okay — your Shruti is ready. | Final tanpura playback throws after the Shruti is already chosen. T37 can still be spoken. |
 
-## Reachability notes that affect asset planning
+## Reachability notes
 
 - Stage 1 attempt 1 has no reference and still says "Let's try singing it again in 3...".
 - `teachingLevel` `standard` inside `_onStartingNoteFailure` uses the same script as the one-miss path. The failure count is already at least 1 when that handler runs, so the `standard` branch does not add a different sentence.

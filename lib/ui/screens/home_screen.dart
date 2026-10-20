@@ -16,10 +16,17 @@ import 'package:harmony/ui/screens/assist_mode_screen.dart';
 
 /// Main Shruti drone screen: Sa selection and play/pause.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, AudioService? audioService})
-    : _audioService = audioService;
+  const HomeScreen({
+    super.key,
+    AudioService? audioService,
+    this.assistModeBuilder,
+  }) : _audioService = audioService;
 
   final AudioService? _audioService;
+
+  /// Optional Tutor Mode route body. Tests inject a screen that skips real
+  /// Kitten model download; production uses [AssistModeScreen].
+  final WidgetBuilder? assistModeBuilder;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -59,7 +66,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final pitch = await Navigator.of(context).push<Pitch>(
-      MaterialPageRoute<Pitch>(builder: (_) => const AssistModeScreen()),
+      MaterialPageRoute<Pitch>(
+        builder: widget.assistModeBuilder ?? (_) => const AssistModeScreen(),
+      ),
     );
     if (!mounted || pitch == null) {
       return;

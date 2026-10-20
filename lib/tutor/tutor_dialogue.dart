@@ -5,12 +5,13 @@
 class TutorDialogue {
   const TutorDialogue({required this.id, required this.text});
 
-  /// Bundled recording id, for example `S70`.
+  /// Dialogue / recording id, for example `S70`.
   final String id;
 
-  /// Exact spoken wording. Mirrored on screen while this clip plays.
+  /// Exact spoken wording. Mirrored on screen while this line plays.
   final String text;
 
+  /// Log label for the dialogue id (legacy `.mp3` suffix kept for log grepping).
   String get assetFileName => '$id.mp3';
 }
 
@@ -347,7 +348,7 @@ abstract final class TutorDialogues {
     s76,
   ];
 
-  /// Ids reserved for orientation; not bundled yet.
+  /// Ids reserved for orientation; no finalized speech yet.
   static const Set<String> reservedWithoutRecordingIds = <String>{
     'S54',
     'S55',
@@ -356,7 +357,7 @@ abstract final class TutorDialogues {
     'S58',
   };
 
-  /// Dialogues with a bundled MP3 available for playback.
+  /// Dialogues with a speakable id (excludes reserved orientation ids).
   static final List<TutorDialogue> withBundledRecording = all
       .where((d) => !reservedWithoutRecordingIds.contains(d.id))
       .toList(growable: false);

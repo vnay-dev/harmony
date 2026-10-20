@@ -1,15 +1,17 @@
 /// Configurable pauses for the voice-first tutor.
 ///
-/// Keeps instruction pacing calm without scattering delays in the UI.
+/// Speech gaps and screen holds default to zero. Listening for a spoken
+/// answer and the example-button confirmation stay timed.
 class TutorTimingConfig {
   const TutorTimingConfig({
-    this.sentencePause = const Duration(milliseconds: 850),
-    this.shortTransitionPause = const Duration(milliseconds: 500),
-    this.speechToReferencePause = const Duration(milliseconds: 650),
-    this.referenceToSpeechPause = const Duration(milliseconds: 650),
-    this.afterSpeechBeforeListenPause = const Duration(milliseconds: 500),
+    this.sentencePause = Duration.zero,
+    this.shortTransitionPause = Duration.zero,
+    this.speechToReferencePause = Duration.zero,
+    this.referenceToSpeechPause = Duration.zero,
+    this.afterSpeechBeforeListenPause = Duration.zero,
     this.speechResponseListenDuration = const Duration(seconds: 5),
     this.exampleReadyAffirmationDuration = const Duration(milliseconds: 1400),
+    this.paceTranscript = true,
   });
 
   /// Instant timing for deterministic unit tests.
@@ -20,7 +22,8 @@ class TutorTimingConfig {
       referenceToSpeechPause = Duration.zero,
       afterSpeechBeforeListenPause = Duration.zero,
       speechResponseListenDuration = const Duration(milliseconds: 1),
-      exampleReadyAffirmationDuration = const Duration(milliseconds: 1);
+      exampleReadyAffirmationDuration = const Duration(milliseconds: 1),
+      paceTranscript = false;
 
   /// Pause between consecutive spoken sentences.
   final Duration sentencePause;
@@ -42,4 +45,9 @@ class TutorTimingConfig {
 
   /// How long "New sound loaded" stays on the example button.
   final Duration exampleReadyAffirmationDuration;
+
+  /// When true, speech holds the line until its transcript has finished
+  /// printing. A synchronizing voice uses the loaded clip length; otherwise
+  /// the wait is the text estimate. Playback does not add a further wait.
+  final bool paceTranscript;
 }

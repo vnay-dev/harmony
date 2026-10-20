@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:harmony/tutor/tutor_answer.dart';
 import 'package:harmony/tutor/tutor_dialogue.dart';
+import 'package:harmony/tutor/tutor_dialogue_timing.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_timing.dart';
 import 'package:harmony/tutor/tutor_voice_coordinator.dart';
@@ -76,23 +79,75 @@ void main() {
       );
 
       await coordinator.speak('One');
-      expect(pauses, <Duration>[const Duration(milliseconds: 42)]);
+      expect(pauses, <Duration>[
+        TutorDialogueTiming.durationFor('One'),
+        const Duration(milliseconds: 42),
+      ]);
     });
 
-    test('speakDialogue binds transcript text and audio id atomically', () async {
+    test('shows the line and stays speaking until printing finishes', () async {
       final voice = FakeTutorVoice();
-      final coordinator = TutorVoiceCoordinator(
+      final playback = Completer<void>();
+      voice.onPlayAssets = (_) => playback.future;
+      var printing = false;
+      late final TutorVoiceCoordinator coordinator;
+      coordinator = TutorVoiceCoordinator(
         voice: voice,
-        timing: const TutorTimingConfig.instant(),
+        wait: (_) async {
+          printing = coordinator.isSpeaking;
+          expect(coordinator.lastLine, TutorDialogues.s26.text);
+          expect(voice.playedAssets, <String>['S26']);
+        },
       );
 
-      await coordinator.speakDialogue(TutorDialogues.s70);
-      expect(coordinator.lastLine, TutorDialogues.s70.text);
-      expect(coordinator.activeDialogue, same(TutorDialogues.s70));
-      expect(voice.playedAssets, <String>['S70']);
-      expect(voice.spoken, <String>[TutorDialogues.s70.text]);
-      expect(coordinator.playedAssetLog, <String>['S70']);
+      await coordinator.speakDialogue(TutorDialogues.s26);
+      expect(printing, isTrue);
+      expect(coordinator.isSpeaking, isFalse);
+      expect(coordinator.lastLine, TutorDialogues.s26.text);
+      playback.complete();
     });
+
+    test(
+      'cancellation during printing drops the line and does not continue',
+      () async {
+        final voice = FakeTutorVoice();
+        late final TutorVoiceCoordinator coordinator;
+        coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          wait: (_) async {
+            coordinator.cancelSpeech();
+          },
+        );
+
+        await coordinator.speakDialogue(TutorDialogues.s26);
+        expect(coordinator.isSpeaking, isFalse);
+        expect(coordinator.activeDialogue, isNull);
+        expect(coordinator.lastLine, TutorDialogues.s26.text);
+
+        await coordinator.speakDialogue(TutorDialogues.s61);
+        expect(coordinator.activeDialogue, isNull);
+        expect(coordinator.lastLine, TutorDialogues.s26.text);
+        expect(voice.playedAssets, isNot(contains('S61')));
+      },
+    );
+
+    test(
+      'speakDialogue binds transcript text and audio id atomically',
+      () async {
+        final voice = FakeTutorVoice();
+        final coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          timing: const TutorTimingConfig.instant(),
+        );
+
+        await coordinator.speakDialogue(TutorDialogues.s70);
+        expect(coordinator.lastLine, TutorDialogues.s70.text);
+        expect(coordinator.activeDialogue, same(TutorDialogues.s70));
+        expect(voice.playedAssets, <String>['S70']);
+        expect(voice.spoken, <String>[TutorDialogues.s70.text]);
+        expect(coordinator.playedAssetLog, <String>['S70']);
+      },
+    );
 
     test('Stage 1 failure speaks S70 then S61 only', () async {
       final voice = FakeTutorVoice();
@@ -112,44 +167,178 @@ void main() {
       expect(coordinator.spokenLog, TutorScripts.startingNoteGuided);
     });
 
-    test('obsolete cancel prevents a late dialogue from sticking as active', () async {
-      final voice = FakeTutorVoice();
-      final coordinator = TutorVoiceCoordinator(
+    test(
+      'obsolete cancel prevents a late dialogue from sticking as active',
+      () async {
+        final voice = FakeTutorVoice();
+        final coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          timing: const TutorTimingConfig.instant(),
+        );
+
+        voice.onPlayAssets = (ids) async {
+          if (ids.length == 1 && ids.first == 'S70') {
+            coordinator.cancelSpeech();
+          }
+        };
+
+        await coordinator.speakDialogue(TutorDialogues.s70);
+        expect(coordinator.isSpeaking, isFalse);
+        expect(coordinator.activeDialogue, isNull);
+
+        // cancelSpeech blocks further speech until a new session resets keys.
+        coordinator.resetEventKeys();
+        await coordinator.speakDialogue(TutorDialogues.s61);
+        expect(coordinator.activeDialogue, same(TutorDialogues.s61));
+        expect(coordinator.lastLine, TutorDialogues.s61.text);
+        expect(voice.playedAssets, contains('S61'));
+      },
+    );
+
+    test('delayed TTS holds the typewriter until playback starts', () async {
+      final voice = FakeTutorVoice()
+        ..synchronizeTranscript = true
+        ..reportedPlaybackDuration = const Duration(milliseconds: 1625)
+        ..startGate = Completer<void>();
+      final waits = <Duration>[];
+      var speakingWhileRevealing = false;
+      var holdingWhileRevealing = true;
+      late final TutorVoiceCoordinator coordinator;
+      coordinator = TutorVoiceCoordinator(
         voice: voice,
-        timing: const TutorTimingConfig.instant(),
+        wait: (duration) async {
+          waits.add(duration);
+          speakingWhileRevealing = coordinator.isSpeaking;
+          holdingWhileRevealing = coordinator.isHoldingTranscript;
+        },
       );
 
-      voice.onPlayAssets = (ids) async {
-        if (ids.length == 1 && ids.first == 'S70') {
-          coordinator.cancelSpeech();
-        }
-      };
+      final speech = coordinator.speakDialogue(TutorDialogues.s26);
+      expect(voice.playbackRequests, 1);
+      expect(coordinator.isSpeaking, isTrue);
+      expect(coordinator.isHoldingTranscript, isTrue);
+      expect(coordinator.transcriptRevealDuration, isNull);
+      expect(waits, isEmpty);
+      expect(voice.playedAssets, isEmpty);
 
-      await coordinator.speakDialogue(TutorDialogues.s70);
+      voice.reportedPlaybackDuration = const Duration(milliseconds: 1625);
+      voice.startGate!.complete();
+      await speech;
+
+      expect(waits, <Duration>[const Duration(milliseconds: 1625)]);
+      expect(
+        waits.single,
+        isNot(TutorDialogueTiming.durationFor(TutorDialogues.s26.text)),
+      );
+      expect(speakingWhileRevealing, isTrue);
+      expect(holdingWhileRevealing, isFalse);
       expect(coordinator.isSpeaking, isFalse);
-      expect(coordinator.activeDialogue, isNull);
-
-      // cancelSpeech blocks further speech until a new session resets keys.
-      coordinator.resetEventKeys();
-      await coordinator.speakDialogue(TutorDialogues.s61);
-      expect(coordinator.activeDialogue, same(TutorDialogues.s61));
-      expect(coordinator.lastLine, TutorDialogues.s61.text);
-      expect(voice.playedAssets, contains('S61'));
+      expect(coordinator.isHoldingTranscript, isFalse);
     });
 
-    test('speak(text) resolves through the same dialogue definition as speakDialogue',
-        () async {
-      final voice = FakeTutorVoice();
-      final coordinator = TutorVoiceCoordinator(
+    test('TTS failure starts text pacing and keeps buttons waiting', () async {
+      final voice = FakeTutorVoice()
+        ..synchronizeTranscript = true
+        ..startGate = Completer<void>();
+      final waits = <Duration>[];
+      var speakingDuringText = false;
+      late final TutorVoiceCoordinator coordinator;
+      coordinator = TutorVoiceCoordinator(
         voice: voice,
-        timing: const TutorTimingConfig.instant(),
+        wait: (duration) async {
+          waits.add(duration);
+          speakingDuringText = coordinator.isSpeaking;
+          expect(coordinator.isHoldingTranscript, isFalse);
+          expect(coordinator.transcriptRevealDuration, isNull);
+        },
       );
 
-      await coordinator.speak(TutorScripts.makeThisEasier);
-      expect(coordinator.activeDialogue, same(TutorDialogues.s70));
-      expect(voice.playedAssets, <String>['S70']);
-      expect(coordinator.lastLine, TutorDialogues.s70.text);
+      final speech = coordinator.speakDialogue(TutorDialogues.s26);
+      expect(coordinator.isHoldingTranscript, isTrue);
+      expect(waits, isEmpty);
+
+      voice.reportedPlaybackDuration = null;
+      voice.startGate!.complete();
+      await speech;
+
+      expect(waits, <Duration>[
+        TutorDialogueTiming.durationFor(TutorDialogues.s26.text),
+      ]);
+      expect(speakingDuringText, isTrue);
+      expect(coordinator.isSpeaking, isFalse);
     });
+
+    test(
+      'text-only playback starts the typewriter without waiting to generate',
+      () async {
+        final voice = FakeTutorVoice()..synchronizeTranscript = true;
+        final waits = <Duration>[];
+        late final TutorVoiceCoordinator coordinator;
+        coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          wait: (duration) async {
+            waits.add(duration);
+            expect(coordinator.isHoldingTranscript, isFalse);
+            expect(coordinator.isSpeaking, isTrue);
+          },
+        );
+
+        await coordinator.speakDialogue(TutorDialogues.s26);
+        expect(waits, <Duration>[
+          TutorDialogueTiming.durationFor(TutorDialogues.s26.text),
+        ]);
+        expect(voice.playbackRequests, 1);
+      },
+    );
+
+    test(
+      'cancellation during TTS generation does not reveal the line',
+      () async {
+        final voice = FakeTutorVoice()
+          ..synchronizeTranscript = true
+          ..reportedPlaybackDuration = const Duration(milliseconds: 1625)
+          ..startGate = Completer<void>();
+        final waits = <Duration>[];
+        final coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          wait: (duration) async {
+            waits.add(duration);
+          },
+        );
+
+        final speech = coordinator.speakDialogue(TutorDialogues.s26);
+        expect(coordinator.isHoldingTranscript, isTrue);
+        expect(voice.playbackRequests, 1);
+
+        coordinator.cancelSpeech();
+        await speech;
+
+        expect(waits, isEmpty);
+        expect(coordinator.isSpeaking, isFalse);
+        expect(coordinator.isHoldingTranscript, isFalse);
+        expect(coordinator.activeDialogue, isNull);
+        expect(voice.playedAssets, isEmpty);
+
+        await coordinator.speakDialogue(TutorDialogues.s61);
+        expect(voice.playedAssets, isNot(contains('S61')));
+      },
+    );
+
+    test(
+      'speak(text) resolves through the same dialogue definition as speakDialogue',
+      () async {
+        final voice = FakeTutorVoice();
+        final coordinator = TutorVoiceCoordinator(
+          voice: voice,
+          timing: const TutorTimingConfig.instant(),
+        );
+
+        await coordinator.speak(TutorScripts.makeThisEasier);
+        expect(coordinator.activeDialogue, same(TutorDialogues.s70));
+        expect(voice.playedAssets, <String>['S70']);
+        expect(coordinator.lastLine, TutorDialogues.s70.text);
+      },
+    );
   });
 
   group('TutorAnswerParser', () {
