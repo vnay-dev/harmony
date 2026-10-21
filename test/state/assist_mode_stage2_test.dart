@@ -7,6 +7,7 @@ import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
+import 'package:harmony/tutor/assist_tutor_hooks.dart';
 
 import '../support/fake_audio_service.dart';
 import '../support/fake_pitch_detection_service.dart';
@@ -23,6 +24,7 @@ void main() {
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
     countdownStepDuration: Duration.zero,
+    assistedSingDuration: null,
   );
 
   StablePitchCandidateFinder buildFinder() {
@@ -265,31 +267,34 @@ void main() {
     expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
   });
 
-  test('liveCentsFromTarget follows the Stage 2 matcher while listening', () async {
-    double? centsWhileListening;
-    final controller = buildRangeController(
-      stage1Pitch: Pitch.c,
-      onRangeListening: (c) async {
-        final hz = c.currentRangeTargetHz;
-        if (hz == null) {
-          return;
-        }
-        // Enough samples for a stable cents reading, not enough to latch match.
-        final flatHz = hz * 0.985;
-        for (var i = 0; i < 5; i++) {
-          detectionService.emit(voiced(flatHz));
-        }
-        centsWhileListening ??= c.liveCentsFromTarget;
-        await emitHz(detectionService, hz);
-      },
-    );
-    addTearDown(controller.dispose);
+  test(
+    'liveCentsFromTarget follows the Stage 2 matcher while listening',
+    () async {
+      double? centsWhileListening;
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          final hz = c.currentRangeTargetHz;
+          if (hz == null) {
+            return;
+          }
+          // Enough samples for a stable cents reading, not enough to latch match.
+          final flatHz = hz * 0.985;
+          for (var i = 0; i < 5; i++) {
+            detectionService.emit(voiced(flatHz));
+          }
+          centsWhileListening ??= c.liveCentsFromTarget;
+          await emitHz(detectionService, hz);
+        },
+      );
+      addTearDown(controller.dispose);
 
-    await controller.startSession();
-    expect(centsWhileListening, isNotNull);
-    expect(centsWhileListening, lessThan(0));
-    expect(controller.liveCentsFromTarget, isNull);
-  });
+      await controller.startSession();
+      expect(centsWhileListening, isNotNull);
+      expect(centsWhileListening, lessThan(0));
+      expect(controller.liveCentsFromTarget, isNull);
+    },
+  );
 
   test(
     'range guide target moves LOW → MID → HIGH with current point',
@@ -939,7 +944,8 @@ void main() {
         if (c.rangePointFailureCount >= 1) {
           sawFailureBeforeRetry = true;
         }
-        if (lowerListens == 1) {
+        // First silence → louder prompt retry; second silence → ordinary miss.
+        if (lowerListens <= 2) {
           detectionService.emit(PitchReading.none);
           return;
         }
@@ -953,10 +959,116 @@ void main() {
 
     await controller.startSession();
 
-    expect(lowerListens, greaterThanOrEqualTo(2));
+    expect(lowerListens, greaterThanOrEqualTo(3));
     expect(sawFailureBeforeRetry, isTrue);
     expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
   });
+
+  test('Stage 2 silence offers louder prompt and retries same point', () async {
+    var inaudibleCalls = 0;
+    var lowerListens = 0;
+    late final AssistModeController controller;
+    controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint != AssistRangePoint.lowerSa) {
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        lowerListens += 1;
+        expect(c.currentRangePoint, AssistRangePoint.lowerSa);
+        if (lowerListens == 1) {
+          expect(c.rangePointFailureCount, 0);
+          detectionService.emit(
+            const PitchReading(hasPitch: false, level: 0.01),
+          );
+          return;
+        }
+        if (lowerListens == 2) {
+          expect(inaudibleCalls, 1);
+          expect(c.rangePointFailureCount, 0);
+          expect(c.inaudibleLouderPromptUsed, isTrue);
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+    controller.tutorHooks = AssistTutorHooks(
+      onInaudibleListen: () async {
+        inaudibleCalls += 1;
+        expect(controller.rangePointFailureCount, 0);
+      },
+    );
+
+    await controller.startSession();
+
+    expect(inaudibleCalls, 1);
+    expect(lowerListens, greaterThanOrEqualTo(2));
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.rangePointFailureCount, 0);
+  });
+
+  test(
+    'Stage 2 audible wrong pitch skips louder prompt and keeps guidance',
+    () async {
+      var inaudibleCalls = 0;
+      var lowerListens = 0;
+      late final AssistModeController controller;
+      controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          if (c.currentRangePoint != AssistRangePoint.lowerSa) {
+            final hz = c.currentRangeTargetHz;
+            if (hz != null) {
+              await emitHz(detectionService, hz);
+            }
+            return;
+          }
+          lowerListens += 1;
+          if (lowerListens == 1) {
+            detectionService.emit(
+              PitchReading(
+                hasPitch: true,
+                frequencyHz: frequencyHzForPitch(Pitch.a),
+                note: Pitch.a,
+                level: 0.6,
+              ),
+            );
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+            return;
+          }
+          expect(c.rangePointFailureCount, 1);
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+      controller.tutorHooks = AssistTutorHooks(
+        onInaudibleListen: () async {
+          inaudibleCalls += 1;
+        },
+      );
+
+      await controller.startSession();
+
+      expect(inaudibleCalls, 0);
+      expect(lowerListens, 2);
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    },
+  );
 
   test('Pa target is the correct fifth above Sa', () async {
     AssistRangeTargets? seenTargets;
@@ -1148,7 +1260,8 @@ void main() {
 
     await controller.startSession();
 
-    expect(silentListens, 3);
+    // Each ordinary miss is preceded by one inaudible louder-prompt retry.
+    expect(silentListens, greaterThanOrEqualTo(3));
     expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
     expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
     expect(controller.activeCandidateResult?.lowerSaMatched, isNot(true));

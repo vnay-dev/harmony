@@ -271,6 +271,14 @@ abstract final class TutorDialogues {
     text: 'Listen and sing along with this sound.',
   );
 
+  /// When the listen window heard no usable voice energy.
+  static const s77 = TutorDialogue(
+    id: 'S77',
+    text:
+        "I couldn't hear you clearly. Could you try singing a little louder? "
+        "There's no hurry.",
+  );
+
   /// Every dialogue definition, including reserved orientation ids.
   static const List<TutorDialogue> all = <TutorDialogue>[
     s01,
@@ -346,6 +354,7 @@ abstract final class TutorDialogues {
     s74,
     s75,
     s76,
+    s77,
   ];
 
   /// Ids reserved for orientation; no finalized speech yet.

@@ -14,6 +14,15 @@ void main() {
     expect(VoiceActivity.hasVoiceEnergy(silent), isFalse);
   });
 
+  test('minAudibleLevel matches the voiced-energy gate on the level scale', () {
+    expect(VoiceActivity.fullScaleRms, 0.12);
+    expect(
+      VoiceActivity.minAudibleLevel,
+      VoiceActivity.minVoicedRms / VoiceActivity.fullScaleRms,
+    );
+    expect(VoiceActivity.minAudibleLevel, closeTo(0.1, 1e-9));
+  });
+
   test('a strong PCM window is voiced and raises the level', () {
     final loud = Uint8List(2048);
     final data = ByteData.sublistView(loud);

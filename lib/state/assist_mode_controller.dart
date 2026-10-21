@@ -16,6 +16,7 @@ import 'package:harmony/pitch/reference_pitch_adjuster.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/supported_shruti_steps.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
+import 'package:harmony/pitch/voice_activity.dart';
 import 'package:harmony/state/assist_candidate_range_result.dart';
 import 'package:harmony/state/assist_mode_phase.dart';
 import 'package:harmony/tutor/assist_tutor_hooks.dart';
@@ -114,6 +115,18 @@ class AssistModeController extends ChangeNotifier {
   /// Latest voiced Hz while listening in Stage 2 (for the range guide).
   double? _rangeVoiceHz;
   double _voiceActivity = 0;
+
+  /// Peak [PitchReading.level] observed in the current listen window.
+  double _peakVoiceLevel = 0;
+
+  /// True when any pitched frame arrived in the current listen window.
+  bool _sawPitchedFrame = false;
+
+  /// True when mic start/stream failed for the current listen (not inaudible).
+  bool _listenCaptureError = false;
+
+  /// Louder-voice prompt already used for this Stage 1 / range-point attempt.
+  bool _inaudibleLouderPromptUsed = false;
 
   /// Results for each candidate tested in this Stage 2 session.
   final List<AssistCandidateRangeResult> _testedCandidates =
@@ -248,6 +261,12 @@ class AssistModeController extends ChangeNotifier {
   ///
   /// Comes from the same pitch-detection audio window. Zero outside listening.
   double get voiceActivity => _voiceActivity;
+
+  /// Highest [PitchReading.level] seen in the current or last listen window.
+  double get peakVoiceLevel => _peakVoiceLevel;
+
+  /// Whether the louder-voice prompt was already used for this attempt.
+  bool get inaudibleLouderPromptUsed => _inaudibleLouderPromptUsed;
 
   /// 1-based round number while a session is active.
   int get currentRound => _currentRound;
@@ -388,6 +407,7 @@ class AssistModeController extends ChangeNotifier {
     _clearRecoveryEpisode();
     _countdownValue = null;
     _stage1GuidedDemoPending = false;
+    _clearInaudibleAttemptState();
     _referencePitch = initialReferencePitch;
     notifyListeners();
 
@@ -451,6 +471,8 @@ class AssistModeController extends ChangeNotifier {
       return;
     }
 
+    // New ordinary attempt — allow one louder prompt again.
+    _clearInaudibleAttemptState();
     final generation = _sessionGeneration;
     await _playAndListenRound(generation, incrementRound: false);
   }
@@ -491,6 +513,7 @@ class AssistModeController extends ChangeNotifier {
     _clearRecoveryEpisode();
     _countdownValue = null;
     _stage1GuidedDemoPending = false;
+    _clearInaudibleAttemptState();
     _referencePitch = initialReferencePitch;
 
     final generation = ++_sessionGeneration;
@@ -912,136 +935,152 @@ class AssistModeController extends ChangeNotifier {
     await _safeStopReferenceSound();
     await _safeStopDetection();
 
-    if (_stage1GuidedDemoPending) {
-      final demoPlayed = await _playStage1GuidedDemo(generation);
-      _stage1GuidedDemoPending = false;
-      if (!demoPlayed) {
+    var allowGuidedDemo = true;
+    while (_isActive(generation)) {
+      if (allowGuidedDemo && _stage1GuidedDemoPending) {
+        final demoPlayed = await _playStage1GuidedDemo(generation);
+        _stage1GuidedDemoPending = false;
+        if (!demoPlayed) {
+          return false;
+        }
+      }
+      allowGuidedDemo = false;
+
+      // Stage 1: the user already tapped "I'm ready" — no spoken/visual
+      // countdown. Stage 2 still uses the 3…2…1 lead-in before each solo listen.
+      if (_stage == AssistStage.exploringRange) {
+        final countedDown = await _runCountdown(generation);
+        if (!countedDown) {
+          return false;
+        }
+      } else {
+        _countdownValue = null;
+      }
+
+      await tutorHooks?.beforeListen?.call();
+      if (!_isActive(generation)) {
         return false;
       }
-    }
 
-    // Stage 1: the user already tapped "I'm ready" — no spoken/visual countdown.
-    // Stage 2 still uses the 3…2…1 lead-in before each solo listen.
-    if (_stage == AssistStage.exploringRange) {
-      final countedDown = await _runCountdown(generation);
-      if (!countedDown) {
+      // LISTEN — mic on, reference audio off.
+      _candidateFinder.reset();
+      _clearListenCapture();
+      _resetListenEnergyTracking();
+      _listenCaptureError = false;
+      _rawF0LogCounter = 0;
+      _setPhase(AssistUiPhase.listening);
+      try {
+        await _startPitchAnalysis();
+      } on PitchDetectionException catch (_) {
+        _listenCaptureError = true;
+        _errorMessage = "That's okay. Let's try that once more.";
+        _failListenCapture(reason: 'pitch_detection_start_failed');
+        notifyListeners();
+        return true;
+      } catch (_) {
+        _listenCaptureError = true;
+        _errorMessage = "That's okay. Let's try that once more.";
+        _failListenCapture(reason: 'listen_start_failed');
+        notifyListeners();
+        return true;
+      }
+
+      _startListenProgress(generation);
+      await _awaitPhase(timing.listenDuration, generation);
+      _stopListenProgress();
+      if (!_isActive(generation)) {
         return false;
       }
-    } else {
-      _countdownValue = null;
-    }
 
-    await tutorHooks?.beforeListen?.call();
-    if (!_isActive(generation)) {
-      return false;
-    }
+      // END LISTENING — leave listening/failure eligibility before stopping.
+      final timedOutWithoutAccept = _acceptedListenCandidate == null;
+      if (timedOutWithoutAccept && kDebugMode) {
+        debugPrint('AssistDiag LISTEN_TIMEOUT');
+      }
 
-    // LISTEN — mic on, reference audio off.
-    _candidateFinder.reset();
-    _clearListenCapture();
-    _rawF0LogCounter = 0;
-    _setPhase(AssistUiPhase.listening);
-    try {
-      await _startPitchAnalysis();
-    } on PitchDetectionException catch (_) {
-      _errorMessage = "That's okay. Let's try that once more.";
-      _failListenCapture(reason: 'pitch_detection_start_failed');
-      notifyListeners();
-      return true;
-    } catch (_) {
-      _errorMessage = "That's okay. Let's try that once more.";
-      _failListenCapture(reason: 'listen_start_failed');
-      notifyListeners();
-      return true;
-    }
-
-    _startListenProgress(generation);
-    await _awaitPhase(timing.listenDuration, generation);
-    _stopListenProgress();
-    if (!_isActive(generation)) {
-      return false;
-    }
-
-    // END LISTENING — leave listening/failure eligibility before stopping.
-    final timedOutWithoutAccept = _acceptedListenCandidate == null;
-    if (timedOutWithoutAccept && kDebugMode) {
-      debugPrint('AssistDiag LISTEN_TIMEOUT');
-    }
-
-    if (_uiPhase == AssistUiPhase.listening) {
-      _setPhase(AssistUiPhase.processing);
-    }
-    _disablePitchAnalysis();
-    _logListeningStop(
-      reason: _acceptedListenCandidate != null
-          ? 'candidate_accepted'
-          : 'listen_window_ended',
-    );
-    await _readingsSubscription?.cancel();
-    _readingsSubscription = null;
-    await _safeStopDetection();
-
-    final observation = _takeListenObservation();
-    await tutorHooks?.afterListenWindow?.call(observation != null);
-    if (!_isActive(generation)) {
-      return false;
-    }
-
-    if (observation == null) {
-      _failListenCapture(reason: 'no_candidate_after_listen');
-      notifyListeners();
-      return true;
-    }
-
-    if (kDebugMode) {
-      debugPrint('AssistDiag CONTROLLER_RECEIVED_SUCCESS');
-      debugPrint(
-        'AssistDiag FINAL_RESULT candidate=${observation.pitch.label}@'
-        '${observation.frequencyHz.toStringAsFixed(1)}Hz '
-        'n=${observation.stableSampleCount}',
+      if (_uiPhase == AssistUiPhase.listening) {
+        _setPhase(AssistUiPhase.processing);
+      }
+      _disablePitchAnalysis();
+      _logListeningStop(
+        reason: _acceptedListenCandidate != null
+            ? 'candidate_accepted'
+            : 'listen_window_ended',
       );
-    }
+      await _readingsSubscription?.cancel();
+      _readingsSubscription = null;
+      await _safeStopDetection();
 
-    final nearest = nearestSupportedShruti(observation.frequencyHz);
-    if (nearest == null) {
-      _failListenCapture(reason: 'no_supported_shruti');
+      final observation = _takeListenObservation();
+      await tutorHooks?.afterListenWindow?.call(observation != null);
+      if (!_isActive(generation)) {
+        return false;
+      }
+
+      if (observation == null) {
+        if (await _offerInaudibleRecoveryIfNeeded(generation)) {
+          continue;
+        }
+        _failListenCapture(reason: 'no_candidate_after_listen');
+        notifyListeners();
+        return true;
+      }
+
+      if (kDebugMode) {
+        debugPrint('AssistDiag CONTROLLER_RECEIVED_SUCCESS');
+        debugPrint(
+          'AssistDiag FINAL_RESULT candidate=${observation.pitch.label}@'
+          '${observation.frequencyHz.toStringAsFixed(1)}Hz '
+          'n=${observation.stableSampleCount}',
+        );
+      }
+
+      final nearest = nearestSupportedShruti(observation.frequencyHz);
+      if (nearest == null) {
+        // Usable voice was heard — ordinary miss, not inaudible.
+        _clearInaudibleAttemptState();
+        _failListenCapture(reason: 'no_supported_shruti');
+        notifyListeners();
+        return true;
+      }
+
+      // Starting point only — not the user's final Shruti.
+      _stage1FailureCount = 0;
+      _clearInaudibleAttemptState();
+      _referencePitch = nearest.pitch;
+      _pitchAdjuster.start(nearest.frequencyHz);
+
+      if (kDebugMode) {
+        debugPrint(
+          'AssistDiag detectedVoiceHz='
+          '${observation.frequencyHz.toStringAsFixed(1)}',
+        );
+        debugPrint('AssistDiag detectedVoiceNote=${observation.pitch.label}');
+        debugPrint(
+          'AssistDiag startingPointCandidate=${nearest.pitch.label} '
+          '(not final Shruti)',
+        );
+        debugPrint(
+          'AssistDiag startingPointHz='
+          '${nearest.frequencyHz.toStringAsFixed(1)}',
+        );
+      }
+
+      // Stage 2 opening already finished in afterListenWindow after "I'm ready".
+      // Use the short entry yield so the first range intro follows promptly.
+      if (_uiPhase != AssistUiPhase.processing) {
+        _setPhase(AssistUiPhase.processing);
+      }
       notifyListeners();
-      return true;
+      await _awaitPhase(timing.stage2EntryTransitionDuration, generation);
+      if (!_isActive(generation)) {
+        return false;
+      }
+
+      return _beginStage2(generation);
     }
 
-    // Starting point only — not the user's final Shruti.
-    _stage1FailureCount = 0;
-    _referencePitch = nearest.pitch;
-    _pitchAdjuster.start(nearest.frequencyHz);
-
-    if (kDebugMode) {
-      debugPrint(
-        'AssistDiag detectedVoiceHz='
-        '${observation.frequencyHz.toStringAsFixed(1)}',
-      );
-      debugPrint('AssistDiag detectedVoiceNote=${observation.pitch.label}');
-      debugPrint(
-        'AssistDiag startingPointCandidate=${nearest.pitch.label} '
-        '(not final Shruti)',
-      );
-      debugPrint(
-        'AssistDiag startingPointHz='
-        '${nearest.frequencyHz.toStringAsFixed(1)}',
-      );
-    }
-
-    // Stage 2 opening already finished in afterListenWindow after "I'm ready".
-    // Use the short entry yield so the first range intro follows promptly.
-    if (_uiPhase != AssistUiPhase.processing) {
-      _setPhase(AssistUiPhase.processing);
-    }
-    notifyListeners();
-    await _awaitPhase(timing.stage2EntryTransitionDuration, generation);
-    if (!_isActive(generation)) {
-      return false;
-    }
-
-    return _beginStage2(generation);
+    return false;
   }
 
   /// Plays a short mid-range demo so the user can hear a sound to match.
@@ -1163,6 +1202,7 @@ class AssistModeController extends ChangeNotifier {
     _assistedAttempts = 0;
     _soundChangeDeclined = false;
     _forceAssistedPass = false;
+    _clearInaudibleAttemptState();
     final result = AssistCandidateRangeResult(candidate);
     _activeCandidateResult = result;
     _testedCandidates.add(result);
@@ -1200,7 +1240,14 @@ class AssistModeController extends ChangeNotifier {
   ///
   /// On Lower Sa match: pause for audibility. On Pa match: pause for comfort.
   /// On Upper Sa match: pause for comfort. On no match: retry same point.
-  Future<bool> _playAndMatchRangePoint(int generation) async {
+  ///
+  /// When [soloListenOnly] is true (inaudible recovery), skips reference /
+  /// assisted lead-in and goes straight to countdown + listen.
+  Future<bool> _playAndMatchRangePoint(
+    int generation, {
+    bool soloListenOnly = false,
+    bool afterAssisted = false,
+  }) async {
     final targets = _rangeTargets;
     final point = _currentRangePoint;
     final candidate = _currentCandidate;
@@ -1221,11 +1268,21 @@ class AssistModeController extends ChangeNotifier {
       _forceAssistedPass = false;
     }
     final useAssisted =
-        forcedAssist ||
-        (_rangePointFailureCount >= soloMissesBeforeAssistance &&
-            _assistedAttempts == 0);
+        !soloListenOnly &&
+        (forcedAssist ||
+            (_rangePointFailureCount >= soloMissesBeforeAssistance &&
+                _assistedAttempts == 0));
+    final assistedVerification = afterAssisted || useAssisted;
 
-    if (useAssisted) {
+    if (soloListenOnly) {
+      _disablePitchAnalysis();
+      await _safeStopDetection();
+      await _safeStopReferenceSound();
+      await _safePauseAudio();
+      if (!_isActive(generation)) {
+        return false;
+      }
+    } else if (useAssisted) {
       final assisted = await _runAssistedSinging(generation, targetHz);
       if (assisted != AssistedSingResult.readyForSolo ||
           !_isActive(generation)) {
@@ -1303,6 +1360,8 @@ class AssistModeController extends ChangeNotifier {
     // Sa and Upper Sa remain distinct.
     _targetMatcher.start(targetHz, foldOctaves: false);
     _clearListenCapture();
+    _resetListenEnergyTracking();
+    _listenCaptureError = false;
     _rangeMatchAccepted = false;
     _rangeVoiceHz = null;
     _rawF0LogCounter = 0;
@@ -1310,11 +1369,13 @@ class AssistModeController extends ChangeNotifier {
     try {
       await _startPitchAnalysis();
     } on PitchDetectionException catch (_) {
+      _listenCaptureError = true;
       _errorMessage = "That's okay. Let's try that once more.";
       _targetMatcher.stop();
       notifyListeners();
       return true;
     } catch (_) {
+      _listenCaptureError = true;
       _errorMessage = "That's okay. Let's try that once more.";
       _targetMatcher.stop();
       notifyListeners();
@@ -1347,8 +1408,17 @@ class AssistModeController extends ChangeNotifier {
     }
 
     if (!matched) {
+      if (await _offerInaudibleRecoveryIfNeeded(generation)) {
+        return _playAndMatchRangePoint(
+          generation,
+          soloListenOnly: true,
+          afterAssisted: assistedVerification,
+        );
+      }
+      // Ordinary miss (or second silence) — next cycle may prompt louder once.
+      _inaudibleLouderPromptUsed = false;
       _rangePointFailureCount += 1;
-      if (useAssisted) {
+      if (assistedVerification) {
         _assistedAttempts += 1;
       }
       if (kDebugMode) {
@@ -1358,7 +1428,7 @@ class AssistModeController extends ChangeNotifier {
           'failures=$_rangePointFailureCount — retry same point',
         );
       }
-      if (useAssisted) {
+      if (assistedVerification) {
         _recoveryMode = AssistRecoveryMode.normal;
         if (_movedForRecovery || _soundChangeDeclined) {
           _enterStartingNoteRefresh();
@@ -1377,6 +1447,7 @@ class AssistModeController extends ChangeNotifier {
     _movedForRecovery = false;
     _soundChangeDeclined = false;
     _forceAssistedPass = false;
+    _clearInaudibleAttemptState();
 
     if (kDebugMode) {
       debugPrint(
@@ -1850,11 +1921,61 @@ class AssistModeController extends ChangeNotifier {
     _listenCaptureResolved = false;
   }
 
+  void _resetListenEnergyTracking() {
+    _peakVoiceLevel = 0;
+    _sawPitchedFrame = false;
+    _voiceActivity = 0;
+  }
+
+  void _clearInaudibleAttemptState() {
+    _inaudibleLouderPromptUsed = false;
+    _listenCaptureError = false;
+  }
+
+  /// True when this failed listen had no usable singing energy.
+  ///
+  /// Mic/capture errors and audible-but-unmatched singing are excluded.
+  bool get _isInaudibleListenFailure {
+    if (_listenCaptureError) {
+      return false;
+    }
+    if (_sawPitchedFrame) {
+      return false;
+    }
+    return _peakVoiceLevel < VoiceActivity.minAudibleLevel;
+  }
+
+  /// Speaks the louder-voice prompt at most once per attempt.
+  ///
+  /// Returns `true` when the caller should retry the same listen stage.
+  Future<bool> _offerInaudibleRecoveryIfNeeded(int generation) async {
+    if (!_isInaudibleListenFailure || _inaudibleLouderPromptUsed) {
+      if (!_isInaudibleListenFailure) {
+        // Audible miss — clear so a later attempt can prompt again after
+        // ordinary recovery advances.
+        _inaudibleLouderPromptUsed = false;
+      }
+      return false;
+    }
+
+    _inaudibleLouderPromptUsed = true;
+    if (kDebugMode) {
+      debugPrint(
+        'AssistDiag INAUDIBLE_LISTEN peak=${_peakVoiceLevel.toStringAsFixed(3)} '
+        'threshold=${VoiceActivity.minAudibleLevel}',
+      );
+    }
+    await tutorHooks?.onInaudibleListen?.call();
+    return _isActive(generation);
+  }
+
   /// Atomically latches a successful candidate and leaves listening eligibility.
   ///
   /// Returns `false` when a prior decision already resolved this listen window.
-  /// The listen timer may still be running; [ _takeListenObservation ] prefers
-  /// this latch so a later timeout cannot overwrite success.
+  /// Closes the listen timer immediately (same as Stage 2 early match) so a
+  /// success does not wait out the remaining [AssistTimingConfig.listenDuration].
+  /// [_takeListenObservation] prefers this latch so a later timeout path cannot
+  /// overwrite success.
   bool _tryAcceptListenCandidate(
     StablePitchCandidate candidate, {
     required String source,
@@ -1883,6 +2004,7 @@ class AssistModeController extends ChangeNotifier {
     if (_uiPhase == AssistUiPhase.listening) {
       _setPhase(AssistUiPhase.processing);
     }
+    _closeWindow();
     return true;
   }
 
@@ -1898,6 +2020,8 @@ class AssistModeController extends ChangeNotifier {
       return;
     }
     _listenCaptureResolved = true;
+    // Ordinary miss — next user-driven attempt may offer louder prompt once.
+    _inaudibleLouderPromptUsed = false;
     _stage1FailureCount += 1;
     // After two failures, the next retry demonstrates a sound first.
     _stage1GuidedDemoPending = _stage1FailureCount >= 2;
@@ -1958,6 +2082,12 @@ class AssistModeController extends ChangeNotifier {
       return;
     }
     final level = reading.level.clamp(0.0, 1.0);
+    if (level > _peakVoiceLevel) {
+      _peakVoiceLevel = level;
+    }
+    if (reading.hasPitch) {
+      _sawPitchedFrame = true;
+    }
     if ((level - _voiceActivity).abs() >= 0.02) {
       _voiceActivity = level;
       notifyListeners();
@@ -2121,6 +2251,8 @@ class AssistModeController extends ChangeNotifier {
     _assistedAttempts = 0;
     _countdownValue = null;
     _stage1GuidedDemoPending = false;
+    _clearInaudibleAttemptState();
+    _resetListenEnergyTracking();
     _referencePitch = initialReferencePitch;
     await _readingsSubscription?.cancel();
     _readingsSubscription = null;

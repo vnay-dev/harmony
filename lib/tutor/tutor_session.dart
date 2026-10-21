@@ -44,6 +44,7 @@ class TutorSession extends ChangeNotifier {
       onCountdownStep: _onCountdownStep,
       beforeListen: _onBeforeListen,
       afterListenWindow: _onAfterListenWindow,
+      onInaudibleListen: _onInaudibleListen,
       beforeAssistedSinging: _onBeforeAssistedSinging,
       onAssistedReferenceWillStart: _onAssistedReferenceWillStart,
       afterAssistedSinging: _onAfterAssistedSinging,
@@ -1278,6 +1279,18 @@ class TutorSession extends ChangeNotifier {
     await _voice.speakOnce(
       'complete-${_engine.referencePitch.label}',
       TutorScripts.completion(_engine.referencePitch.label),
+    );
+  }
+
+  Future<void> _onInaudibleListen() async {
+    final token = _sessionToken;
+    if (!_isLive(token)) {
+      return;
+    }
+    await _voice.speakOnce(
+      'inaudible-${_engine.currentRound}-'
+      '${_engine.currentRangePoint?.name ?? 'start'}',
+      TutorScripts.singALittleLouder,
     );
   }
 

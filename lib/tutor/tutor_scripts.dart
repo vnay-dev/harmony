@@ -25,6 +25,9 @@ class TutorScripts {
   static const stage1ListenPrompt =
       'Your turn. Sing one steady sound for a few seconds.';
 
+  /// Spoken when a listen window heard no usable voice energy.
+  static final singALittleLouder = TutorDialogues.s77.text;
+
   /// Spoken once per session after Stage 1 success acknowledgement.
   ///
   /// Kept for Stage 2 entry. Not part of the Stage 1 CTA redesign.

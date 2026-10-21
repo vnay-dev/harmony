@@ -11,6 +11,7 @@ class AssistTutorHooks {
     this.onCountdownStep,
     this.beforeListen,
     this.afterListenWindow,
+    this.onInaudibleListen,
     this.beforeAssistedSinging,
     this.onAssistedReferenceWillStart,
     this.afterAssistedSinging,
@@ -40,6 +41,12 @@ class AssistTutorHooks {
   /// [captured] is true only when voiced input produced a real capture or
   /// target match. Silence must not be announced as success.
   final Future<void> Function(bool captured)? afterListenWindow;
+
+  /// Listen window ended with no usable voice energy.
+  ///
+  /// Speak a short louder-voice prompt. The engine retries the same listen
+  /// after this Future completes. Do not advance ordinary failure counts here.
+  final Future<void> Function()? onInaudibleListen;
 
   /// Explanation before the assisted countdown. Reference audio has not started.
   final Future<void> Function()? beforeAssistedSinging;

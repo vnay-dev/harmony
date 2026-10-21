@@ -133,6 +133,20 @@ void main() {
       expect(TutorAudioCatalog.isValidAssetId('S74'), isTrue);
     });
 
+    test('inaudible listen recovery maps onto S77', () {
+      expect(
+        TutorDialogues.s77.text,
+        "I couldn't hear you clearly. Could you try singing a little louder? "
+        "There's no hurry.",
+      );
+      expect(TutorScripts.singALittleLouder, TutorDialogues.s77.text);
+      expect(
+        TutorAudioCatalog.assetIdsForSpokenLine(TutorScripts.singALittleLouder),
+        <String>['S77'],
+      );
+      expect(TutorAudioCatalog.isValidAssetId('S77'), isTrue);
+    });
+
     test('Stage 2 first solo countdown maps onto S75 without again', () {
       expect(TutorDialogues.s75.text, "Let's try singing it in 3...");
       expect(TutorScripts.countdownFirst.first, TutorDialogues.s75.text);

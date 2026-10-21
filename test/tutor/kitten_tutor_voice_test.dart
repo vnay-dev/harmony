@@ -72,7 +72,8 @@ void main() {
 
     test('normalizes title-case Try before synthesis (not T-R-Y)', () async {
       final speak = voice.speak(TutorDialogues.s66.text);
-      await _waitUntil(() => synthesizer.texts.isNotEmpty);
+      // Wait until playback is armed so finish() can complete the clip.
+      await _waitUntil(() => transport.loadedFiles.isNotEmpty);
       expect(
         synthesizer.texts.single,
         'try humming any comfortable, steady sound, like Sa.',
@@ -81,6 +82,35 @@ void main() {
       transport.finish();
       await speak;
     });
+
+    test(
+      'modulates punctuation for Kitten prosody without rewriting wording',
+      () async {
+        final speak = voice.speak(
+          'Beautiful.You can stop there!!! Ready…Next,step?',
+        );
+        await _waitUntil(() => transport.loadedFiles.isNotEmpty);
+        expect(
+          synthesizer.texts.single,
+          'Beautiful. You can stop there! Ready... Next, step?',
+        );
+        transport.finish();
+        await speak;
+      },
+    );
+
+    test(
+      'preserves multi-sentence dialogue punctuation for synthesis',
+      () async {
+        final speak = voice.playAssets(const <String>['S74']);
+        await _waitUntil(() => transport.loadedFiles.isNotEmpty);
+        expect(synthesizer.texts.single, TutorDialogues.s74.text);
+        expect(synthesizer.texts.single, contains('. '));
+        expect(synthesizer.texts.single, contains(','));
+        transport.finish();
+        await speak;
+      },
+    );
 
     test(
       'onStarted waits until playback and reports the loaded duration',

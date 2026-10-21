@@ -3,11 +3,11 @@ class AssistTimingConfig {
   const AssistTimingConfig({
     this.referencePlayDuration = const Duration(seconds: 5),
     this.settlingDuration = const Duration(milliseconds: 600),
-    this.listenDuration = const Duration(seconds: 6),
+    this.listenDuration = const Duration(seconds: 8),
     this.transitionDuration = Duration.zero,
     this.stage2EntryTransitionDuration = const Duration(milliseconds: 1),
     this.countdownStepDuration = const Duration(seconds: 1),
-    this.assistedSingDuration,
+    this.assistedSingDuration = const Duration(seconds: 6),
   });
 
   /// How long a Stage 2 reference tone plays before singing.
@@ -36,7 +36,8 @@ class AssistTimingConfig {
 
   /// How long the reference stays audible while the user sings along.
   ///
-  /// Falls back to [listenDuration] when null so tests stay fast.
+  /// Defaults to 6 seconds so solo listen changes do not lengthen practice.
+  /// Pass `null` to fall back to [listenDuration] (useful for fast tests).
   final Duration? assistedSingDuration;
 
   /// Assisted sing-along length. Pitch matching stays off for this whole window.

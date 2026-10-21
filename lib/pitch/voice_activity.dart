@@ -14,7 +14,15 @@ class VoiceActivity {
   static const minVoicedRms = 0.012;
 
   /// Full-scale RMS that maps to activity level 1.
-  static const _fullScaleRms = 0.12;
+  static const fullScaleRms = 0.12;
+
+  /// Peak [PitchReading.level] below this is treated as no usable singing.
+  ///
+  /// Equals [minVoicedRms] / [fullScaleRms] (0.1) — the same energy bar the
+  /// mic pipeline already requires before a frame can be pitched. Assist Mode
+  /// uses this only to decide "sing a little louder" vs ordinary pitch help;
+  /// it does not change YIN or matching thresholds.
+  static const minAudibleLevel = minVoicedRms / fullScaleRms;
 
   static double rmsFromPcm16(Uint8List pcm) {
     if (pcm.length < 2) {
@@ -36,7 +44,7 @@ class VoiceActivity {
     if (rms <= 0) {
       return 0;
     }
-    return (rms / _fullScaleRms).clamp(0.0, 1.0);
+    return (rms / fullScaleRms).clamp(0.0, 1.0);
   }
 
   static bool hasVoiceEnergy(Uint8List pcm) {

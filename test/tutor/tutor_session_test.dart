@@ -35,6 +35,7 @@ void main() {
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
     countdownStepDuration: Duration.zero,
+    assistedSingDuration: null,
   );
 
   const countdownTiming = AssistTimingConfig(
@@ -43,6 +44,7 @@ void main() {
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
     countdownStepDuration: Duration(milliseconds: 1),
+    assistedSingDuration: null,
   );
 
   StablePitchCandidateFinder buildFinder() {
@@ -2017,10 +2019,7 @@ void main() {
           expect(referenceSound.isPlaying, isTrue);
           expect(engine.recoveryMode, AssistRecoveryMode.assistedSinging);
           expect(tutor.dialogueText, TutorScripts.assistedSingAlongPrompt);
-          expect(
-            tutor.dialogueText,
-            isNot(contains('1...')),
-          );
+          expect(tutor.dialogueText, isNot(contains('1...')));
           return;
         }
         if (engine.uiPhase == AssistUiPhase.countdown &&

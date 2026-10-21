@@ -10,9 +10,9 @@ import 'package:harmony/tutor/tutor_scripts.dart';
 class TutorAudioCatalog {
   const TutorAudioCatalog._();
 
-  /// Valid dialogue ids: S01–S53, S60–S76. S54–S58 are reserved / no speech yet.
+  /// Valid dialogue ids: S01–S53, S60–S77. S54–S58 are reserved / no speech yet.
   static final RegExp _assetIdPattern = RegExp(
-    r'^S(?:0[1-9]|[1-4][0-9]|5[0-3]|6[0-9]|7[0-6])$',
+    r'^S(?:0[1-9]|[1-4][0-9]|5[0-3]|6[0-9]|7[0-7])$',
   );
 
   /// Spoken display label (`C`, `C#`, …) to the name clip id.
@@ -93,7 +93,7 @@ class TutorAudioCatalog {
     return TutorDialogues.byText(line.trim());
   }
 
-  /// Whether [assetId] is a known tutor dialogue id (S01–S53, S60–S76).
+  /// Whether [assetId] is a known tutor dialogue id (S01–S53, S60–S77).
   static bool isValidAssetId(String assetId) {
     return _assetIdPattern.hasMatch(assetId);
   }

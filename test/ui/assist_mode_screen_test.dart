@@ -38,6 +38,7 @@ void main() {
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
     countdownStepDuration: Duration.zero,
+    assistedSingDuration: null,
   );
 
   /// On-screen completion line after compliment celebration treatment.
@@ -923,6 +924,7 @@ void main() {
           listenDuration: Duration(milliseconds: 1),
           transitionDuration: Duration(milliseconds: 1),
           countdownStepDuration: Duration.zero,
+          assistedSingDuration: null,
         ),
         initialReferencePitch: Pitch.c,
         prepareAudioSession: () async {},
@@ -1028,6 +1030,7 @@ void main() {
           listenDuration: Duration(milliseconds: 1),
           transitionDuration: Duration(milliseconds: 1),
           countdownStepDuration: Duration.zero,
+          assistedSingDuration: null,
         ),
         initialReferencePitch: Pitch.c,
         prepareAudioSession: () async {},

@@ -11,6 +11,7 @@ import 'package:harmony/pitch/pitch_detection_service.dart';
 import 'package:harmony/pitch/pitch_stability_tracker.dart';
 import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
 import 'package:harmony/pitch/target_pitch_matcher.dart';
+import 'package:harmony/pitch/voice_activity.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/tutor/assist_tutor_hooks.dart';
 
@@ -29,7 +30,20 @@ void main() {
     listenDuration: Duration(milliseconds: 1),
     transitionDuration: Duration(milliseconds: 1),
     countdownStepDuration: Duration.zero,
+    assistedSingDuration: null,
   );
+
+  test('default listenDuration is 8 seconds', () {
+    const timing = AssistTimingConfig();
+    expect(timing.listenDuration, const Duration(seconds: 8));
+  });
+
+  test('default assistedSingDuration stays 6 seconds', () {
+    const timing = AssistTimingConfig();
+    expect(timing.assistedSingDuration, const Duration(seconds: 6));
+    expect(timing.assistedSingWindow, const Duration(seconds: 6));
+    expect(timing.assistedSingWindow, isNot(timing.listenDuration));
+  });
 
   StablePitchCandidateFinder buildFinder() {
     return StablePitchCandidateFinder(
@@ -616,6 +630,68 @@ void main() {
     expect(controller.referencePitch, Pitch.d);
   });
 
+  test('Stage 1 success closes listen window before wait timeout', () async {
+    late final AssistModeController controller;
+    var stage1ListenWaitFinished = false;
+    var afterListenCalls = 0;
+    final capturedResults = <bool>[];
+    // Never completed — proves the round advances via _closeWindow, not wait.
+    final stage1ListenHang = Completer<void>();
+
+    controller = buildController(
+      service: detectionService,
+      timing: const AssistTimingConfig(
+        referencePlayDuration: Duration(milliseconds: 1),
+        settlingDuration: Duration(milliseconds: 1),
+        listenDuration: Duration(seconds: 8),
+        transitionDuration: Duration(milliseconds: 1),
+        countdownStepDuration: Duration.zero,
+        assistedSingDuration: Duration(seconds: 6),
+      ),
+      wait: (duration) async {
+        if (controller.uiPhase == AssistUiPhase.listening &&
+            !controller.isExploringRange) {
+          await emitPitch(detectionService, Pitch.d);
+          await stage1ListenHang.future;
+          stage1ListenWaitFinished = true;
+          return;
+        }
+        if (controller.uiPhase == AssistUiPhase.listening &&
+            controller.isExploringRange) {
+          final hz = controller.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    controller.tutorHooks = AssistTutorHooks(
+      afterListenWindow: (captured) async {
+        afterListenCalls += 1;
+        capturedResults.add(captured);
+      },
+    );
+
+    final started = controller.startSession();
+    await waitUntil(() => controller.stage1Shruti == Pitch.d);
+    expect(stage1ListenWaitFinished, isFalse);
+    expect(controller.isExploringRange, isTrue);
+    expect(controller.uiPhase, isNot(AssistUiPhase.retry));
+    expect(capturedResults, isNotEmpty);
+    expect(capturedResults.first, isTrue);
+
+    await finishStage2WithoutClimbing(controller);
+    await started;
+
+    expect(stage1ListenWaitFinished, isFalse);
+    expect(afterListenCalls, greaterThanOrEqualTo(1));
+    expect(capturedResults.first, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.d);
+  });
+
   test(
     'candidate accepted at the same time as timeout still succeeds',
     () async {
@@ -668,6 +744,149 @@ void main() {
     expect(controller.stage1FailureCount, 1);
   });
 
+  test(
+    'Stage 1 silence offers louder prompt once then ordinary retry',
+    () async {
+      late final AssistModeController controller;
+      var inaudibleCalls = 0;
+      var stage1ListenCount = 0;
+      final peaks = <double>[];
+
+      controller = buildController(
+        service: detectionService,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
+              stage1ListenCount += 1;
+              peaks.add(controller.peakVoiceLevel);
+              detectionService.emit(
+                const PitchReading(hasPitch: false, level: 0.02),
+              );
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+      controller.tutorHooks = AssistTutorHooks(
+        onInaudibleListen: () async {
+          inaudibleCalls += 1;
+          expect(controller.stage1FailureCount, 0);
+          expect(controller.inaudibleLouderPromptUsed, isTrue);
+        },
+      );
+
+      await controller.startSession();
+
+      expect(inaudibleCalls, 1);
+      expect(stage1ListenCount, 2);
+      expect(controller.uiPhase, AssistUiPhase.retry);
+      expect(controller.stage1FailureCount, 1);
+      expect(controller.stage1Shruti, isNull);
+      expect(peaks.first, 0);
+      expect(
+        controller.peakVoiceLevel,
+        lessThan(VoiceActivity.minAudibleLevel),
+      );
+    },
+  );
+
+  test(
+    'Stage 1 audible unstable pitch skips louder prompt and fails normally',
+    () async {
+      late final AssistModeController controller;
+      var inaudibleCalls = 0;
+
+      controller = buildController(
+        service: detectionService,
+        wait: phasedWait(
+          () => controller,
+          onPhase: (phase) async {
+            if (phase == AssistUiPhase.listening &&
+                !controller.isExploringRange) {
+              detectionService.emit(
+                const PitchReading(hasPitch: false, level: 0.55),
+              );
+              await emitPitch(detectionService, Pitch.d, count: 2);
+              await emitPitch(detectionService, Pitch.e, count: 2);
+              await emitPitch(detectionService, Pitch.f, count: 2);
+            }
+          },
+        ),
+      );
+      addTearDown(controller.dispose);
+      controller.tutorHooks = AssistTutorHooks(
+        onInaudibleListen: () async {
+          inaudibleCalls += 1;
+        },
+      );
+
+      await controller.startSession();
+
+      expect(inaudibleCalls, 0);
+      expect(controller.uiPhase, AssistUiPhase.retry);
+      expect(controller.stage1FailureCount, 1);
+      expect(controller.peakVoiceLevel, greaterThanOrEqualTo(0.55));
+    },
+  );
+
+  test('Stage 1 mic permission errors never trigger louder prompt', () async {
+    late final AssistModeController controller;
+    var inaudibleCalls = 0;
+    detectionService.failStart = true;
+
+    controller = buildController(service: detectionService, wait: (_) async {});
+    addTearDown(controller.dispose);
+    controller.tutorHooks = AssistTutorHooks(
+      onInaudibleListen: () async {
+        inaudibleCalls += 1;
+      },
+    );
+
+    await controller.startSession();
+
+    expect(inaudibleCalls, 0);
+    expect(controller.uiPhase, AssistUiPhase.retry);
+    expect(controller.stage1FailureCount, 1);
+  });
+
+  test('Stage 1 listen peak energy resets between attempts', () async {
+    late final AssistModeController controller;
+    final peaksAtListenStart = <double>[];
+
+    controller = buildController(
+      service: detectionService,
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase == AssistUiPhase.listening &&
+              !controller.isExploringRange) {
+            peaksAtListenStart.add(controller.peakVoiceLevel);
+            if (peaksAtListenStart.length == 1) {
+              detectionService.emit(
+                const PitchReading(hasPitch: false, level: 0.01),
+              );
+            } else {
+              detectionService.emit(
+                const PitchReading(hasPitch: false, level: 0.03),
+              );
+            }
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+    controller.tutorHooks = const AssistTutorHooks();
+
+    await controller.startSession();
+
+    expect(peaksAtListenStart, hasLength(2));
+    expect(peaksAtListenStart[0], 0);
+    expect(peaksAtListenStart[1], 0);
+    expect(controller.peakVoiceLevel, closeTo(0.03, 1e-9));
+  });
+
   test('Stage 1 countdown runs before listening when configured', () async {
     late final AssistModeController controller;
     final phases = <AssistUiPhase>[];
@@ -681,6 +900,7 @@ void main() {
         listenDuration: Duration(milliseconds: 1),
         transitionDuration: Duration(milliseconds: 1),
         countdownStepDuration: Duration(milliseconds: 1),
+        assistedSingDuration: null,
       ),
       wait: (duration) async {
         phases.add(controller.uiPhase);
@@ -739,7 +959,8 @@ void main() {
     expect(controller.stage1FailureCount, 2);
     expect(controller.stage1GuidedDemoPending, isTrue);
     expect(controller.teachingLevel, TutorTeachingLevel.guided);
-    expect(listens, 2);
+    // Each ordinary miss is preceded by one inaudible louder-prompt listen.
+    expect(listens, 4);
   });
 
   test('silence never accepts a starting point and yields retry', () async {
@@ -1150,6 +1371,8 @@ void main() {
       controller = buildController(
         service: detectionService,
         wait: (duration) async {
+          // Gate before emit so a held wait cannot be skipped by early close.
+          await enqueueWait(duration);
           final phase = controller.uiPhase;
           if (phase == AssistUiPhase.listening) {
             if (controller.isExploringRange) {
@@ -1161,7 +1384,6 @@ void main() {
               await emitPitch(detectionService, Pitch.f);
             }
           }
-          await enqueueWait(duration);
         },
       );
       addTearDown(controller.dispose);

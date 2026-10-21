@@ -1,11 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:harmony/theme/design_tokens.dart';
 
-/// Subtle pitch-direction cue: too low ← on target → too high.
+/// Pitch-direction cue: too low ← on target → too high.
 ///
 /// Uses signed cents from the existing Stage 2 matcher. Null [centsFromTarget]
-/// keeps the indicator soft and centered so silence never misleads.
+/// holds the last valid cue briefly, then returns to a neutral listening state
+/// so brief detection gaps never mislead.
 class PitchDirectionDial extends StatefulWidget {
   const PitchDirectionDial({
     super.key,
@@ -22,17 +25,32 @@ class PitchDirectionDial extends StatefulWidget {
   /// Visual full-scale magnitude in cents (±).
   static const double visualRangeCents = 100;
 
-  /// Matcher tolerance treated as "near target" for soft confirmation.
+  /// Matcher tolerance treated as the green target zone (±).
   static const double nearTargetCents = 50;
 
-  /// Especially satisfying zone around center.
+  /// Especially satisfying zone around center (glow strength).
   static const double sweetSpotCents = 18;
 
-  static const double height = 36;
+  /// How long to keep the last valid cue after cents become null.
+  static const Duration nullHoldDuration = Duration(milliseconds: 250);
+
+  /// Extra cents before leaving / entering the on-pitch zone at the ±50 edge.
+  static const double zoneHysteresisCents = 8;
+
+  /// Track height used by the painted dial.
+  static const double trackHeight = 36;
+
+  /// Soft green for the in-tolerance target zone and indicator.
+  static const Color targetZoneColor = Color(0xFF5B9A6F);
+
+  /// Soft red for out-of-tolerance zones and indicator.
+  static const Color outsideZoneColor = Color(0xFFC4746A);
 
   @override
   State<PitchDirectionDial> createState() => _PitchDirectionDialState();
 }
+
+enum _PitchFeedbackZone { listening, low, onPitch, high }
 
 class _PitchDirectionDialState extends State<PitchDirectionDial>
     with SingleTickerProviderStateMixin {
@@ -50,6 +68,13 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
 
   /// Soft confirmation when near / on target.
   double _centerGlow = 0;
+
+  /// Last valid cents driving the visual cue (may outlive a brief null).
+  double? _heldCents;
+
+  _PitchFeedbackZone _zone = _PitchFeedbackZone.listening;
+
+  Timer? _nullHoldTimer;
 
   static const double _smoothing = 0.16;
   static const double _liveSmoothing = 0.12;
@@ -70,10 +95,14 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
   @override
   void didUpdateWidget(covariant PitchDirectionDial oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _applyCents(widget.centsFromTarget, animate: true);
     if (!widget.visible) {
+      _cancelNullHold();
+      _heldCents = null;
+      _zone = _PitchFeedbackZone.listening;
       _liveTarget = 0;
       _target = 0;
+    } else {
+      _applyCents(widget.centsFromTarget, animate: true);
     }
     _ensureTicking();
   }
@@ -84,18 +113,56 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
     }
   }
 
+  void _cancelNullHold() {
+    _nullHoldTimer?.cancel();
+    _nullHoldTimer = null;
+  }
+
+  void _scheduleNullHoldReset() {
+    _cancelNullHold();
+    _nullHoldTimer = Timer(PitchDirectionDial.nullHoldDuration, () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _heldCents = null;
+        _zone = _PitchFeedbackZone.listening;
+        _liveTarget = 0;
+        _target = 0;
+      });
+      _ensureTicking();
+    });
+  }
+
   void _applyCents(double? cents, {required bool animate}) {
     if (cents == null) {
-      _liveTarget = 0;
-      _target = 0;
       if (!animate) {
+        _cancelNullHold();
+        _heldCents = null;
+        _zone = _PitchFeedbackZone.listening;
+        _liveTarget = 0;
+        _target = 0;
         _liveAmount = 0;
         _display = 0;
         _centerGlow = 0;
+        return;
+      }
+
+      // Keep the last valid visual cue briefly; ignore repeat nulls mid-hold.
+      if (_heldCents == null) {
+        _liveTarget = 0;
+        _target = 0;
+        return;
+      }
+      if (_nullHoldTimer == null) {
+        _scheduleNullHoldReset();
       }
       return;
     }
 
+    _cancelNullHold();
+    _heldCents = cents;
+    _zone = _classifyWithHysteresis(cents);
     _liveTarget = 1;
     final clamped = (cents / PitchDirectionDial.visualRangeCents).clamp(
       -1.0,
@@ -108,6 +175,41 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
       _liveAmount = 1;
       _display = shaped;
       _centerGlow = _glowForCents(cents);
+    }
+  }
+
+  _PitchFeedbackZone _classifyWithHysteresis(double cents) {
+    final abs = cents.abs();
+    const band = PitchDirectionDial.nearTargetCents;
+    const h = PitchDirectionDial.zoneHysteresisCents;
+
+    switch (_zone) {
+      case _PitchFeedbackZone.onPitch:
+        if (abs <= band + h) {
+          return _PitchFeedbackZone.onPitch;
+        }
+        return cents < 0 ? _PitchFeedbackZone.low : _PitchFeedbackZone.high;
+      case _PitchFeedbackZone.low:
+        if (cents > 0 && abs > band - h) {
+          return _PitchFeedbackZone.high;
+        }
+        if (abs <= band - h) {
+          return _PitchFeedbackZone.onPitch;
+        }
+        return _PitchFeedbackZone.low;
+      case _PitchFeedbackZone.high:
+        if (cents < 0 && abs > band - h) {
+          return _PitchFeedbackZone.low;
+        }
+        if (abs <= band - h) {
+          return _PitchFeedbackZone.onPitch;
+        }
+        return _PitchFeedbackZone.high;
+      case _PitchFeedbackZone.listening:
+        if (abs <= band) {
+          return _PitchFeedbackZone.onPitch;
+        }
+        return cents < 0 ? _PitchFeedbackZone.low : _PitchFeedbackZone.high;
     }
   }
 
@@ -126,21 +228,49 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
     return Curves.easeOut.transform(t.clamp(0.0, 1.0));
   }
 
+  Color get _indicatorColor {
+    switch (_zone) {
+      case _PitchFeedbackZone.onPitch:
+        return PitchDirectionDial.targetZoneColor;
+      case _PitchFeedbackZone.low:
+      case _PitchFeedbackZone.high:
+        return PitchDirectionDial.outsideZoneColor;
+      case _PitchFeedbackZone.listening:
+        return DesignTokens.listeningAccent;
+    }
+  }
+
+  String get _guidanceText {
+    if (!widget.visible) {
+      return '';
+    }
+    switch (_zone) {
+      case _PitchFeedbackZone.listening:
+        return 'Listening for your pitch';
+      case _PitchFeedbackZone.low:
+        return 'Sing higher';
+      case _PitchFeedbackZone.onPitch:
+        return 'On pitch';
+      case _PitchFeedbackZone.high:
+        return 'Sing lower';
+    }
+  }
+
   void _onTick() {
     if (!mounted) {
       return;
     }
     final nextDisplay = _display + (_target - _display) * _smoothing;
     final nextLive = _liveAmount + (_liveTarget - _liveAmount) * _liveSmoothing;
-    final glowTarget = widget.centsFromTarget == null
-        ? 0.0
-        : _glowForCents(widget.centsFromTarget!);
+    final held = _heldCents;
+    final glowTarget = held == null ? 0.0 : _glowForCents(held);
     final nextGlow = _centerGlow + (glowTarget - _centerGlow) * 0.14;
 
     final settled =
         (nextDisplay - _target).abs() < 0.001 &&
         (nextLive - _liveTarget).abs() < 0.001 &&
-        (nextGlow - glowTarget).abs() < 0.001;
+        (nextGlow - glowTarget).abs() < 0.001 &&
+        _nullHoldTimer == null;
 
     setState(() {
       _display = nextDisplay;
@@ -156,6 +286,7 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
 
   @override
   void dispose() {
+    _cancelNullHold();
     _ticker
       ..removeListener(_onTick)
       ..dispose();
@@ -164,43 +295,104 @@ class _PitchDirectionDialState extends State<PitchDirectionDial>
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     final semantics = _semanticsLabel();
+    final guidance = _guidanceText;
+
     return Semantics(
       label: semantics,
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 220),
         opacity: widget.visible ? 1 : 0,
-        child: SizedBox(
+        child: Column(
           key: const ValueKey<String>('pitch-direction-dial'),
-          height: PitchDirectionDial.height,
-          width: double.infinity,
-          child: CustomPaint(
-            painter: _PitchDirectionDialPainter(
-              position: _display,
-              liveAmount: _liveAmount.clamp(0.0, 1.0),
-              centerGlow: _centerGlow.clamp(0.0, 1.0),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: PitchDirectionDial.trackHeight,
+              width: double.infinity,
+              child: CustomPaint(
+                painter: _PitchDirectionDialPainter(
+                  position: _display,
+                  liveAmount: _liveAmount.clamp(0.0, 1.0),
+                  centerGlow: _centerGlow.clamp(0.0, 1.0),
+                  indicatorColor: _indicatorColor,
+                  zoneLive: _zone != _PitchFeedbackZone.listening,
+                ),
+              ),
             ),
-          ),
+            const SizedBox(height: DesignTokens.spaceSm),
+            Text(
+              guidance,
+              key: const ValueKey<String>('pitch-direction-guidance'),
+              textAlign: TextAlign.center,
+              style: textTheme.bodyMedium?.copyWith(
+                color: _zone == _PitchFeedbackZone.listening
+                    ? DesignTokens.muted
+                    : DesignTokens.onSurface,
+                fontWeight: _zone == _PitchFeedbackZone.listening
+                    ? FontWeight.w400
+                    : FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: DesignTokens.spaceXs),
+            const _PitchZoneLegend(),
+          ],
         ),
       ),
     );
   }
 
   String _semanticsLabel() {
-    final cents = widget.centsFromTarget;
     if (!widget.visible) {
       return 'Pitch direction idle';
     }
-    if (cents == null) {
-      return 'Listening for your pitch';
+    switch (_zone) {
+      case _PitchFeedbackZone.listening:
+        return 'Listening for your pitch';
+      case _PitchFeedbackZone.low:
+        return 'Sing higher';
+      case _PitchFeedbackZone.onPitch:
+        return 'On pitch';
+      case _PitchFeedbackZone.high:
+        return 'Sing lower';
     }
-    if (cents.abs() <= PitchDirectionDial.sweetSpotCents) {
-      return 'On target';
-    }
-    if (cents < 0) {
-      return 'A little low — go higher';
-    }
-    return 'A little high — go lower';
+  }
+}
+
+class _PitchZoneLegend extends StatelessWidget {
+  const _PitchZoneLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(
+      context,
+    ).textTheme.bodySmall?.copyWith(color: DesignTokens.muted, fontSize: 12);
+    return Row(
+      key: const ValueKey<String>('pitch-direction-legend'),
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _legendSwatch(PitchDirectionDial.targetZoneColor),
+        const SizedBox(width: 4),
+        Text('Target zone', style: style),
+        const SizedBox(width: DesignTokens.spaceMd),
+        _legendSwatch(PitchDirectionDial.outsideZoneColor),
+        const SizedBox(width: 4),
+        Text('Outside', style: style),
+      ],
+    );
+  }
+
+  Widget _legendSwatch(Color color) {
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.85),
+        shape: BoxShape.circle,
+      ),
+    );
   }
 }
 
@@ -209,11 +401,15 @@ class _PitchDirectionDialPainter extends CustomPainter {
     required this.position,
     required this.liveAmount,
     required this.centerGlow,
+    required this.indicatorColor,
+    required this.zoneLive,
   });
 
   final double position;
   final double liveAmount;
   final double centerGlow;
+  final Color indicatorColor;
+  final bool zoneLive;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -223,9 +419,54 @@ class _PitchDirectionDialPainter extends CustomPainter {
     final trackWidth = trackRight - trackLeft;
     final trackCenter = Offset((trackLeft + trackRight) / 2, centerY);
 
+    // Zone band half-width in track units (normalized [-1, 1] → pixels).
+    final zoneHalf =
+        (PitchDirectionDial.nearTargetCents /
+                PitchDirectionDial.visualRangeCents)
+            .clamp(0.0, 1.0);
+    // Match the easeOut shaping used by the indicator so the painted band
+    // aligns with where an on-pitch reading visually sits.
+    final shapedHalf = Curves.easeOut.transform(zoneHalf);
+    final greenHalfWidth = shapedHalf * (trackWidth / 2);
+    final greenLeft = trackCenter.dx - greenHalfWidth;
+    final greenRight = trackCenter.dx + greenHalfWidth;
+
+    final zoneAlpha = 0.22 + 0.18 * liveAmount;
+    final redPaint = Paint()
+      ..color = PitchDirectionDial.outsideZoneColor.withValues(alpha: zoneAlpha)
+      ..strokeWidth = 6
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+    final greenPaint = Paint()
+      ..color = PitchDirectionDial.targetZoneColor.withValues(
+        alpha: zoneAlpha + 0.08,
+      )
+      ..strokeWidth = 6
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    // Red outer segments.
+    canvas.drawLine(
+      Offset(trackLeft, centerY),
+      Offset(greenLeft, centerY),
+      redPaint,
+    );
+    canvas.drawLine(
+      Offset(greenRight, centerY),
+      Offset(trackRight, centerY),
+      redPaint,
+    );
+    // Green center target zone (±50 cents).
+    canvas.drawLine(
+      Offset(greenLeft, centerY),
+      Offset(greenRight, centerY),
+      greenPaint,
+    );
+
+    // Soft baseline track for definition.
     final trackPaint = Paint()
-      ..color = DesignTokens.outline.withValues(alpha: 0.55 + 0.25 * liveAmount)
-      ..strokeWidth = 2
+      ..color = DesignTokens.outline.withValues(alpha: 0.35 + 0.15 * liveAmount)
+      ..strokeWidth = 1.2
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
     canvas.drawLine(
@@ -248,18 +489,19 @@ class _PitchDirectionDialPainter extends CustomPainter {
       opacity: 0.28 + 0.22 * liveAmount,
     );
 
-    // Center resting mark — warm listening accent (not guiding blue).
+    // Center resting mark.
+    final centerMarkColor = zoneLive
+        ? PitchDirectionDial.targetZoneColor
+        : DesignTokens.listeningAccent;
     final centerMarkPaint = Paint()
-      ..color = DesignTokens.listeningAccent.withValues(
-        alpha: 0.18 + 0.35 * centerGlow,
-      )
+      ..color = centerMarkColor.withValues(alpha: 0.18 + 0.35 * centerGlow)
       ..style = PaintingStyle.fill;
     canvas.drawCircle(trackCenter, 2.4 + centerGlow * 1.2, centerMarkPaint);
 
     if (centerGlow > 0.02) {
       final glowPaint = Paint()
-        ..color = DesignTokens.listeningAccent.withValues(
-          alpha: 0.10 * centerGlow,
+        ..color = PitchDirectionDial.targetZoneColor.withValues(
+          alpha: 0.12 * centerGlow,
         )
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
       canvas.drawCircle(trackCenter, 14 + centerGlow * 6, glowPaint);
@@ -270,7 +512,7 @@ class _PitchDirectionDialPainter extends CustomPainter {
     final indicatorRadius = 5.2 + centerGlow * 1.4;
 
     final haloPaint = Paint()
-      ..color = DesignTokens.listeningAccent.withValues(
+      ..color = indicatorColor.withValues(
         alpha: (0.10 + 0.18 * liveAmount + 0.16 * centerGlow).clamp(0.0, 0.4),
       )
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
@@ -281,9 +523,7 @@ class _PitchDirectionDialPainter extends CustomPainter {
           RadialGradient(
             colors: [
               DesignTokens.surface.withValues(alpha: 0.95),
-              DesignTokens.listeningAccent.withValues(
-                alpha: 0.55 + 0.35 * liveAmount,
-              ),
+              indicatorColor.withValues(alpha: 0.55 + 0.35 * liveAmount),
             ],
             stops: const [0.15, 1],
           ).createShader(
@@ -292,9 +532,7 @@ class _PitchDirectionDialPainter extends CustomPainter {
     canvas.drawCircle(indicatorCenter, indicatorRadius, fillPaint);
 
     final rimPaint = Paint()
-      ..color = DesignTokens.listeningAccent.withValues(
-        alpha: 0.35 + 0.45 * liveAmount,
-      )
+      ..color = indicatorColor.withValues(alpha: 0.35 + 0.45 * liveAmount)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2;
     canvas.drawCircle(indicatorCenter, indicatorRadius, rimPaint);
@@ -324,6 +562,8 @@ class _PitchDirectionDialPainter extends CustomPainter {
   bool shouldRepaint(covariant _PitchDirectionDialPainter oldDelegate) {
     return oldDelegate.position != position ||
         oldDelegate.liveAmount != liveAmount ||
-        oldDelegate.centerGlow != centerGlow;
+        oldDelegate.centerGlow != centerGlow ||
+        oldDelegate.indicatorColor != indicatorColor ||
+        oldDelegate.zoneLive != zoneLive;
   }
 }
