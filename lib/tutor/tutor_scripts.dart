@@ -143,6 +143,13 @@ class TutorScripts {
 
   static final lowerAudibilityQuestion = TutorDialogues.s25.text;
 
+  /// Lower Sa follow-up when search posture places the candidate higher.
+  ///
+  /// Used for [AssistShrutiSearchMode.seekingHigher] (and climbing if asked).
+  /// Yes/No still routes through [AssistModeController.reportLowerSaAudible] /
+  /// [AssistModeController.reportLowerSaTooLow].
+  static const lowerComfortQuestion = 'Were you comfortable singing that note?';
+
   static final upperComfortQuestion = TutorDialogues.s30.text;
 
   static final lowerNotClear = TutorDialogues.s27.text;
@@ -179,10 +186,15 @@ class TutorScripts {
   /// After assisted practice, before offering a nearby sound.
   static final makeThisEasier = TutorDialogues.s70.text;
 
-  /// Yes/No question after a sound did not feel right.
-  ///
-  /// Does not name pitch, notes, or targets.
+  /// Legacy Yes/No nearby-sound offer (kept for audio catalog / older tests).
   static final offerDifferentSound = TutorDialogues.s71.text;
+
+  /// Shown after assisted practice still does not settle.
+  static const noteDifficultyQuestion = 'What feels difficult about this note?';
+
+  /// Reassuring lead-in when guided recovery is exhausted and a nearby note starts.
+  static const tryDifferentNoteAfterStruggle =
+      "That's okay! Let's try a different note and see if it feels easier.";
 
   /// Spoken when the user wants to keep the current sound.
   static final stayWithThisSound = TutorDialogues.s73.text;
@@ -210,8 +222,24 @@ class TutorScripts {
     TutorDialogues.s32.text,
   ];
 
+  /// Final result line. [shrutiLabel] is the on-screen pitch (`C`, `C#`, …).
+  ///
+  /// Speech normalization expands sharps (`C#` → "C sharp") for TTS. The UI
+  /// may pretty-print `#` as `♯` and insert the celebration heart after Awesome.
   static String completion(String shrutiLabel) =>
-      '${TutorDialogues.s39.text} Your Shruti is $shrutiLabel.';
+      'Awesome.\n$shrutiLabel is your comfortable Shruti to start singing.';
+
+  /// Soft fallback when Stage 2 could not fully verify a comfortable Shruti.
+  ///
+  /// Spoken instead of [completion] when the engine marks a provisional result.
+  /// Text-only is fine — not tied to a bundled dialogue asset.
+  static String provisionalCompletion(String shrutiLabel) =>
+      "That's okay — we'll keep $shrutiLabel as a comfortable place for your voice.";
+
+  /// Whether [line] is the final success transcript for [shrutiLabel].
+  static bool isCompletionLine(String line, String shrutiLabel) {
+    return line == completion(shrutiLabel);
+  }
 
   static final unresolved = <String>[
     TutorDialogues.s52.text,
@@ -247,4 +275,13 @@ class TutorScripts {
 
   /// Middle / upper comfort No (not spoken).
   static const ctaNotComfortable = 'Not comfortable';
+
+  /// Recovery choice: note feels too low (not spoken).
+  static const ctaNoteTooLow = "It's too low for my voice";
+
+  /// Recovery choice: note feels too high (not spoken).
+  static const ctaNoteTooHigh = "It's too high for my voice";
+
+  /// Recovery choice: request another guided sing-along (not spoken).
+  static const ctaNoteNotSure = "I'm not sure — help me sing it";
 }

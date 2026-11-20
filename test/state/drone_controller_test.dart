@@ -155,6 +155,30 @@ void main() {
     expect(audioService.isPlaying, isFalse);
   });
 
+  test('pausePlayback cancels in-flight selectPitch resume', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    final gate = Completer<void>();
+    audioService.blockLoad = gate.future;
+
+    final selectFuture = controller.selectPitch(Pitch.d);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isBusy, isTrue);
+    expect(controller.selectedPitch, Pitch.d);
+
+    await controller.pausePlayback();
+    expect(controller.isPlaying, isFalse);
+
+    gate.complete();
+    await selectFuture;
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+    expect(controller.selectedPitch, Pitch.d);
+  });
+
   test('togglePlayback surfaces play errors', () async {
     await controller.initialize();
     audioService.failPlay = true;

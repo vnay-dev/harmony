@@ -13,6 +13,7 @@ import 'package:harmony/pitch/target_pitch_matcher.dart';
 import 'package:harmony/state/assist_mode_controller.dart';
 import 'package:harmony/state/drone_controller.dart';
 import 'package:harmony/theme/app_theme.dart';
+import 'package:harmony/tutor/assist_tutor_hooks.dart';
 import 'package:harmony/tutor/tutor_dialogue_timing.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 import 'package:harmony/tutor/tutor_session.dart';
@@ -43,9 +44,9 @@ void main() {
 
   /// On-screen completion line after compliment celebration treatment.
   Finder findCelebratedCompletion(String shrutiLabel) {
+    final display = formatShrutiDisplayLabel(shrutiLabel);
     return find.text(
-      'Wonderful 💙! We found a comfortable Shruti for you. '
-      'Your Shruti is $shrutiLabel.',
+      'Awesome 💙!\n$display is your comfortable Shruti to start singing.',
       findRichText: true,
     );
   }
@@ -100,6 +101,19 @@ void main() {
     }
   }
 
+  Future<void> waitUntil(
+    bool Function() condition, {
+    int attempts = 200,
+  }) async {
+    for (var i = 0; i < attempts; i++) {
+      if (condition()) {
+        return;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+    fail('Condition not met within $attempts attempts.');
+  }
+
   /// Completes Stage 2 with a valid recommendation: first candidate Upper Sa
   /// Comfortable, next candidate Upper Sa Strained ??? final = first.
   Future<void> finishStage2WithoutClimbing(
@@ -129,29 +143,6 @@ void main() {
       } else {
         await Future<void>.delayed(Duration.zero);
       }
-    }
-  }
-
-  /// Taps Stage 1 / Stage 2 CTAs while the engine advances under a live TutorSession.
-  Future<void> tapStage1PrimaryActions(
-    WidgetTester tester, {
-    int attempts = 80,
-  }) async {
-    for (var i = 0; i < attempts; i++) {
-      for (final label in <String>[
-        TutorScripts.ctaLetsBegin,
-        TutorScripts.ctaImReadyToSingSa,
-        TutorScripts.ctaImReady,
-        TutorScripts.ctaLetsTryAgain,
-        TutorScripts.ctaPlayTheSound,
-      ]) {
-        final button = find.text(label);
-        if (button.evaluate().isNotEmpty) {
-          await tester.tap(button);
-          await tester.pump();
-        }
-      }
-      await tester.pump();
     }
   }
 
@@ -437,7 +428,7 @@ void main() {
   });
 
   testWidgets(
-    'completion shows discovered Shruti, keeps playing, and uses Play My Shruti',
+    'completion shows discovered Shruti, auto-plays, and uses Pause Shruti',
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1.0;
@@ -474,9 +465,10 @@ void main() {
         find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
         findsOneWidget,
       );
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(find.byType(TutorPresenceCircle), findsOneWidget);
-      expect(find.text('Play My Shruti'), findsOneWidget);
+      expect(find.text(Pitch.cSharp.displayLabel), findsWidgets);
+      expect(find.byType(TutorPresenceCircle), findsNothing);
+      expect(find.text('Pause Shruti'), findsOneWidget);
+      expect(find.text('Play My Shruti'), findsNothing);
       expect(find.text('Try Again'), findsOneWidget);
       expect(
         find.byKey(const ValueKey<String>('assist-try-again')),
@@ -486,102 +478,213 @@ void main() {
       expect(find.textContaining('Hz'), findsNothing);
       expect(assistAudio.isPlaying, isTrue);
       expect(controller.isReferencePlaying, isTrue);
+      expect(controller.completionPlaybackReady, isTrue);
+
+      await tester.tap(find.text('Pause Shruti'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(assistAudio.isPlaying, isFalse);
+      expect(controller.isReferencePlaying, isFalse);
+      expect(find.text('Play Shruti'), findsOneWidget);
+      expect(find.text('Pause Shruti'), findsNothing);
+
+      await tester.tap(find.text('Play Shruti'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(assistAudio.isPlaying, isTrue);
+      expect(controller.isReferencePlaying, isTrue);
+      expect(find.text('Pause Shruti'), findsOneWidget);
     },
   );
 
   testWidgets(
-    'Play My Shruti navigates to Default Mode with confirmed pitch autoplaying',
+    'result CTAs stay hidden until dialogue finishes and playback is ready',
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
 
-      final droneAudio = FakeAudioService();
-      final drone = DroneController(audioService: droneAudio);
-      addTearDown(drone.dispose);
-      await drone.initialize();
-      await drone.selectPitch(Pitch.d);
-      expect(drone.selectedPitch, Pitch.d);
-      expect(drone.isPlaying, isFalse);
-
       final detection = FakePitchDetectionService();
       final assistAudio = FakeAudioService();
-      late final AssistModeController assistController;
+      final holdSpeech = Completer<void>();
+      late final AssistModeController controller;
+      controller = AssistModeController(
+        detectionService: detection,
+        audioService: assistAudio,
+        candidateFinder: buildFinder(),
+        targetMatcher: TargetPitchMatcher(
+          toleranceCents: 50,
+          samplesToMatch: 4,
+          samplesToLoseMatch: 2,
+          stabilityTracker: PitchStabilityTracker(
+            samplesToBecomeStable: 3,
+            mismatchesToBecomeUnstable: 2,
+          ),
+        ),
+        referenceSoundGenerator: FakeReferenceSoundGenerator(),
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {},
+        wait: (_) async {
+          if (controller.uiPhase == AssistUiPhase.listening) {
+            emitForCurrentListen(detection, controller, Pitch.cSharp);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      // Hold completion before the screen attaches its TutorSession hooks.
+      controller.tutorHooks = AssistTutorHooks(
+        beforeCompletionPlayback: () => holdSpeech.future,
+      );
+
       await tester.runAsync(() async {
-        assistController = await buildCompletedSession(
-          detection: detection,
-          audio: assistAudio,
-        );
+        await controller.startSession();
+        unawaited(finishStage2WithoutClimbing(controller));
+        await waitUntil(() => controller.uiPhase == AssistUiPhase.completed);
       });
-      addTearDown(assistController.dispose);
+
+      expect(controller.completionPlaybackReady, isFalse);
+      expect(assistAudio.isPlaying, isFalse);
+
+      final tutor = TutorSession(
+        engine: controller,
+        voice: SilentTutorVoice(),
+        speechRecognizer: SilentTutorSpeechRecognizer(),
+        timing: const TutorTimingConfig.instant(),
+        wait: (_) async {},
+      );
+      addTearDown(tutor.dispose);
 
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.light(),
-          home: ListenableBuilder(
-            listenable: drone,
-            builder: (context, _) {
-              return Scaffold(
-                body: Column(
-                  children: [
-                    Text(
-                      drone.selectedPitch.label,
-                      key: const ValueKey<String>('default-selected-pitch'),
-                    ),
-                    Text(
-                      drone.isPlaying ? 'playing' : 'paused',
-                      key: const ValueKey<String>('default-playback'),
-                    ),
-                    TextButton(
-                      onPressed: () async {
-                        final pitch = await Navigator.of(context).push<Pitch>(
-                          MaterialPageRoute<Pitch>(
-                            builder: (_) => AssistModeScreen(
-                              controller: assistController,
-                              tutorVoice: SilentTutorVoice(),
-                              speechRecognizer: SilentTutorSpeechRecognizer(),
-                              tutorTiming: const TutorTimingConfig.instant(),
-                              autoBegin: false,
-                            ),
-                          ),
-                        );
-                        if (pitch != null) {
-                          await drone.playPitch(pitch);
-                        }
-                      },
-                      child: const Text('Find My Shruti'),
-                    ),
-                  ],
-                ),
-              );
-            },
+          home: AssistModeScreen(
+            controller: controller,
+            tutorSession: tutor,
+            autoBegin: false,
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
 
-      expect(find.text(Pitch.d.label), findsOneWidget);
+      expect(tutor.step, TutorStep.complete);
+      expect(controller.completionPlaybackReady, isFalse);
+      expect(find.text('Pause Shruti'), findsNothing);
+      expect(find.text('Play Shruti'), findsNothing);
+      expect(find.text('Try Again'), findsNothing);
+      expect(find.byType(TutorPresenceCircle), findsNothing);
+      expect(find.text(Pitch.cSharp.displayLabel), findsWidgets);
 
-      await tester.tap(find.text('Find My Shruti'));
-      await tester.pumpAndSettle();
+      holdSpeech.complete();
+      await tester.runAsync(() async {
+        await waitUntil(() => controller.completionPlaybackReady);
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('Play My Shruti'), findsOneWidget);
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
       expect(assistAudio.isPlaying, isTrue);
-
-      await tester.tap(find.text('Play My Shruti'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Find My Shruti'), findsOneWidget);
-      expect(find.text('Play My Shruti'), findsNothing);
-      expect(drone.selectedPitch, Pitch.cSharp);
-      expect(drone.isPlaying, isTrue);
-      expect(droneAudio.isPlaying, isTrue);
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
-      expect(find.text('playing'), findsOneWidget);
+      expect(find.text('Pause Shruti'), findsOneWidget);
+      expect(find.text('Try Again'), findsOneWidget);
     },
   );
+
+  testWidgets('Home from completion applies confirmed pitch to Default Mode', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final droneAudio = FakeAudioService();
+    final drone = DroneController(audioService: droneAudio);
+    addTearDown(drone.dispose);
+    await drone.initialize();
+    await drone.selectPitch(Pitch.d);
+    expect(drone.selectedPitch, Pitch.d);
+    expect(drone.isPlaying, isFalse);
+
+    final detection = FakePitchDetectionService();
+    final assistAudio = FakeAudioService();
+    late final AssistModeController assistController;
+    await tester.runAsync(() async {
+      assistController = await buildCompletedSession(
+        detection: detection,
+        audio: assistAudio,
+      );
+    });
+    addTearDown(assistController.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: ListenableBuilder(
+          listenable: drone,
+          builder: (context, _) {
+            return Scaffold(
+              body: Column(
+                children: [
+                  Text(
+                    drone.selectedPitch.label,
+                    key: const ValueKey<String>('default-selected-pitch'),
+                  ),
+                  Text(
+                    drone.isPlaying ? 'playing' : 'paused',
+                    key: const ValueKey<String>('default-playback'),
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      final pitch = await Navigator.of(context).push<Pitch>(
+                        MaterialPageRoute<Pitch>(
+                          builder: (_) => AssistModeScreen(
+                            controller: assistController,
+                            tutorVoice: SilentTutorVoice(),
+                            speechRecognizer: SilentTutorSpeechRecognizer(),
+                            tutorTiming: const TutorTimingConfig.instant(),
+                            autoBegin: false,
+                          ),
+                        ),
+                      );
+                      if (pitch != null) {
+                        await drone.playPitch(pitch);
+                      }
+                    },
+                    child: const Text('Find My Shruti'),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(Pitch.d.label), findsOneWidget);
+
+    await tester.tap(find.text('Find My Shruti'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pause Shruti'), findsOneWidget);
+    expect(find.text(Pitch.cSharp.displayLabel), findsWidgets);
+    expect(assistAudio.isPlaying, isTrue);
+
+    await tester.tap(find.byKey(const ValueKey<String>('tutor-home')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Find My Shruti'), findsOneWidget);
+    expect(find.text('Pause Shruti'), findsNothing);
+    expect(drone.selectedPitch, Pitch.cSharp);
+    expect(drone.isPlaying, isTrue);
+    expect(droneAudio.isPlaying, isTrue);
+    expect(find.text(Pitch.cSharp.label), findsOneWidget);
+    expect(find.text('playing'), findsOneWidget);
+    expect(assistAudio.isPlaying, isFalse);
+  });
 
   testWidgets(
     'abandoning Assist Mode before completion does not overwrite Default Mode',
@@ -773,9 +876,9 @@ void main() {
       await tester.tap(find.text('Find My Shruti'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Play My Shruti'), findsOneWidget);
+      expect(find.text('Pause Shruti'), findsOneWidget);
       expect(find.text('Try Again'), findsOneWidget);
-      expect(find.text(Pitch.cSharp.label), findsOneWidget);
+      expect(find.text(Pitch.cSharp.displayLabel), findsWidgets);
       expect(assistAudio.isPlaying, isTrue);
 
       pass = 1;
@@ -784,24 +887,25 @@ void main() {
       await tester.runAsync(() async {
         await assistController.tryAgain();
         await finishStage2WithoutClimbing(assistController);
+        await waitUntil(() => assistController.completionPlaybackReady);
       });
       expect(assistController.uiPhase, AssistUiPhase.completed);
       expect(assistController.referencePitch, Pitch.a);
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(const ValueKey<String>('assist-play-my-shruti')),
+        find.byKey(const ValueKey<String>('assist-pause-shruti')),
         findsOneWidget,
       );
       expect(
         find.byKey(const ValueKey<String>('assist-try-again')),
         findsOneWidget,
       );
-      expect(find.text(Pitch.a.label), findsOneWidget);
-      expect(find.text(Pitch.cSharp.label), findsNothing);
+      expect(find.text(Pitch.a.displayLabel), findsWidgets);
+      expect(find.text(Pitch.cSharp.displayLabel), findsNothing);
       expect(assistAudio.isPlaying, isTrue);
 
-      // Still on Assist completion ??? Default Mode must be untouched.
+      // Still on Assist completion — Default Mode must stay untouched until Home.
       expect(drone.selectedPitch, Pitch.g);
       expect(drone.isPlaying, isFalse);
 
@@ -809,12 +913,23 @@ void main() {
         find.byKey(const ValueKey<String>('tutor-home')),
       );
       homeButton.onPressed!();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pumpAndSettle();
 
-      expect(drone.selectedPitch, Pitch.g);
-      expect(drone.isPlaying, isFalse);
-      expect(find.text(Pitch.g.label), findsOneWidget);
+      expect(drone.selectedPitch, Pitch.a);
+      expect(drone.isPlaying, isTrue);
+      expect(
+        find.byKey(const ValueKey<String>('default-selected-pitch')),
+        findsOneWidget,
+      );
+      expect(find.text('Tutor Mode'), findsNothing);
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey<String>('default-selected-pitch')),
+            )
+            .data,
+        Pitch.a.label,
+      );
     },
   );
 
@@ -1295,7 +1410,7 @@ void main() {
     await tester.pump();
 
     expect(findCelebratedCompletion(Pitch.cSharp.label), findsOneWidget);
-    expect(find.text(Pitch.cSharp.label), findsOneWidget);
+    expect(find.text(Pitch.cSharp.displayLabel), findsWidgets);
     expect(
       find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
       findsOneWidget,
@@ -1306,7 +1421,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.byType(TutorPresenceCircle), findsOneWidget);
+    expect(find.byType(TutorPresenceCircle), findsNothing);
     expect(find.text('Could you hear and match the lower Sa?'), findsNothing);
     expect(find.textContaining('Hz'), findsNothing);
   });
@@ -1376,7 +1491,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text(Pitch.e.label), findsOneWidget);
+    expect(find.text(Pitch.e.displayLabel), findsWidgets);
     expect(findCelebratedCompletion(Pitch.e.label), findsOneWidget);
 
     pass = 1;
@@ -1388,8 +1503,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(sawClearedMidRestart, isTrue);
-    expect(find.text(Pitch.e.label), findsNothing);
-    expect(find.text(Pitch.a.label), findsOneWidget);
+    expect(find.text(Pitch.e.displayLabel), findsNothing);
+    expect(find.text(Pitch.a.displayLabel), findsWidgets);
     expect(findCelebratedCompletion(Pitch.a.label), findsOneWidget);
     expect(
       find.byKey(const ValueKey<String>('assist-confirmed-shruti')),
@@ -1884,49 +1999,49 @@ void main() {
     expectNoRenderOverflow(tester);
   });
 
-  testWidgets(
-    'completion keeps the circle surface without a journey checklist',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('completion replaces the circle with the Shruti result surface', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      final detection = FakePitchDetectionService();
-      final audio = FakeAudioService();
-      late final AssistModeController controller;
-      await tester.runAsync(() async {
-        controller = await buildCompletedSession(
-          detection: detection,
-          audio: audio,
-        );
-      });
-      addTearDown(controller.dispose);
+    final detection = FakePitchDetectionService();
+    final audio = FakeAudioService();
+    late final AssistModeController controller;
+    await tester.runAsync(() async {
+      controller = await buildCompletedSession(
+        detection: detection,
+        audio: audio,
+      );
+    });
+    addTearDown(controller.dispose);
 
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: AppTheme.light(),
-          home: AssistModeScreen(
-            controller: controller,
-            tutorVoice: SilentTutorVoice(),
-            speechRecognizer: SilentTutorSpeechRecognizer(),
-            tutorTiming: const TutorTimingConfig.instant(),
-            autoBegin: false,
-          ),
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: AssistModeScreen(
+          controller: controller,
+          tutorVoice: SilentTutorVoice(),
+          speechRecognizer: SilentTutorSpeechRecognizer(),
+          tutorTiming: const TutorTimingConfig.instant(),
+          autoBegin: false,
         ),
-      );
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      expect(controller.uiPhase, AssistUiPhase.completed);
-      expect(find.byKey(const ValueKey<String>('tutor-journey')), findsNothing);
-      expect(find.text('Finding your Shruti'), findsNothing);
-      expect(
-        findCelebratedCompletion(controller.referencePitch.label),
-        findsOneWidget,
-      );
-      expect(find.byType(TutorPresenceCircle), findsOneWidget);
-    },
-  );
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(find.byKey(const ValueKey<String>('tutor-journey')), findsNothing);
+    expect(find.text('Finding your Shruti'), findsNothing);
+    expect(
+      findCelebratedCompletion(controller.referencePitch.label),
+      findsOneWidget,
+    );
+    expect(find.byType(TutorPresenceCircle), findsNothing);
+    expect(find.text(controller.referencePitch.displayLabel), findsWidgets);
+  });
 
   testWidgets('different-sound question shows enabled Yes, No, and Home', (
     tester,
@@ -1954,16 +2069,17 @@ void main() {
     addTearDown(tutor.dispose);
 
     expectNoRenderOverflow(tester);
-    expect(find.text(TutorScripts.offerDifferentSound), findsOneWidget);
+    expect(find.text(TutorScripts.noteDifficultyQuestion), findsOneWidget);
     expect(find.byType(TutorPresenceCircle), findsOneWidget);
-    expect(find.text('Yes'), findsOneWidget);
-    expect(find.text('No'), findsOneWidget);
+    expect(find.text(TutorScripts.ctaNoteTooLow), findsOneWidget);
+    expect(find.text(TutorScripts.ctaNoteTooHigh), findsOneWidget);
+    expect(find.text(TutorScripts.ctaNoteNotSure), findsOneWidget);
     expect(find.text('Stop'), findsNothing);
     expect(find.byKey(const ValueKey<String>('tutor-home')), findsOneWidget);
     expect(
       tester
           .widget<TutorActionButton>(
-            find.byKey(const ValueKey<String>('assist-different-sound-yes')),
+            find.byKey(const ValueKey<String>('assist-note-too-low')),
           )
           .onPressed,
       isNotNull,
@@ -1971,16 +2087,22 @@ void main() {
     expect(
       tester
           .widget<TutorActionButton>(
-            find.byKey(const ValueKey<String>('assist-different-sound-no')),
+            find.byKey(const ValueKey<String>('assist-note-too-high')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    expect(
+      tester
+          .widget<TutorActionButton>(
+            find.byKey(const ValueKey<String>('assist-note-not-sure')),
           )
           .onPressed,
       isNotNull,
     );
 
     matchNearby = true;
-    await tester.tap(
-      find.byKey(const ValueKey<String>('assist-different-sound-yes')),
-    );
+    await tester.tap(find.byKey(const ValueKey<String>('assist-note-too-low')));
     await tester.pump();
     await tester.runAsync(() async {
       final deadline = DateTime.now().add(const Duration(seconds: 5));
@@ -2023,7 +2145,7 @@ void main() {
 
     matchAfterDecline = true;
     await tester.tap(
-      find.byKey(const ValueKey<String>('assist-different-sound-no')),
+      find.byKey(const ValueKey<String>('assist-note-not-sure')),
     );
     await tester.pump();
     await tester.runAsync(() async {
@@ -2078,13 +2200,15 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('open-choice'), findsOneWidget);
-    expect(find.text(TutorScripts.offerDifferentSound), findsNothing);
+    expect(find.text(TutorScripts.noteDifficultyQuestion), findsNothing);
     expect(engine.uiPhase, AssistUiPhase.intro);
     expect(engine.isSessionActive, isFalse);
     expect(tutor.canAnswerDifferentSound, isFalse);
     expect(tutor.step, TutorStep.stopped);
 
-    await tester.runAsync(() => tutor.answerDifferentSound(true));
+    await tester.runAsync(
+      () => tutor.answerNoteDifficulty(AssistNoteDifficultyChoice.tooLow),
+    );
     await tester.pump();
 
     expect(engine.uiPhase, AssistUiPhase.intro);

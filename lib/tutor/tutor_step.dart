@@ -18,7 +18,7 @@ enum TutorStep {
   askUpperComfort,
   exploreNextShruti,
 
-  /// Stage 2 recovery: offer a nearby sound after assisted practice.
+  /// Stage 2 recovery: ask what feels difficult after assisted practice.
   offerDifferentSound,
   complete,
   unresolved,

@@ -57,13 +57,16 @@ void main() {
       expect(changed, 2);
     });
 
-    test('keeps playing when the finite clip reaches its end while looping', () async {
-      await player.play();
-      expect(player.isPlaying, isTrue);
-      transport.finish();
-      await Future<void>.delayed(Duration.zero);
-      expect(player.isPlaying, isTrue);
-    });
+    test(
+      'keeps playing when the finite clip reaches its end while looping',
+      () async {
+        await player.play();
+        expect(player.isPlaying, isTrue);
+        transport.finish();
+        await Future<void>.delayed(Duration.zero);
+        expect(player.isPlaying, isTrue);
+      },
+    );
 
     test('stop clears playback without leaving a playing state', () async {
       await player.play();

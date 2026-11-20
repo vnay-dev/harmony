@@ -8,6 +8,9 @@ class FakePitchDetectionService implements PitchDetectionService {
       StreamController<PitchReading>.broadcast(sync: true);
 
   bool failStart = false;
+
+  /// Number of upcoming [start] calls that should throw before succeeding.
+  int remainingStartFailures = 0;
   int startCount = 0;
   int stopCount = 0;
   int disposeCount = 0;
@@ -29,6 +32,10 @@ class FakePitchDetectionService implements PitchDetectionService {
   @override
   Future<void> start() async {
     startCount += 1;
+    if (remainingStartFailures > 0) {
+      remainingStartFailures -= 1;
+      throw PitchDetectionException('Microphone permission was denied.');
+    }
     if (failStart) {
       throw PitchDetectionException('Microphone permission was denied.');
     }

@@ -38,10 +38,10 @@ void main() {
       );
     });
 
-    test('detects completion Wonderful', () {
+    test('detects completion Awesome', () {
       final line = TutorScripts.completion('C');
       expect(TutorCompliment.containsCompliment(line), isTrue);
-      expect(TutorCompliment.celebrationInsertIndex(line), 'Wonderful'.length);
+      expect(TutorCompliment.celebrationInsertIndex(line), 'Awesome'.length);
     });
 
     test('ignores non-compliment dialogue', () {

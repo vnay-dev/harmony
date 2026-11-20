@@ -7,4 +7,8 @@ void main() {
     expect(AppConfig.appName, 'Harmony');
     expect(AppConfig.description, isNotEmpty);
   });
+
+  test('Find My Shruti stays disabled for the initial Shruti-only launch', () {
+    expect(AppConfig.enableFindMyShruti, isFalse);
+  });
 }

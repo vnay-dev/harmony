@@ -14,6 +14,9 @@ class FakeAudioService implements AudioService {
   /// When set, [play] awaits this before completing (for race tests).
   Future<void>? blockPlay;
 
+  /// When set, [load] awaits this before completing (for race tests).
+  Future<void>? blockLoad;
+
   bool _isPlaying = false;
   String? _currentAsset;
 
@@ -28,6 +31,10 @@ class FakeAudioService implements AudioService {
   @override
   Future<void> load(String assetPath) async {
     loadCount += 1;
+    final gate = blockLoad;
+    if (gate != null) {
+      await gate;
+    }
     if (failLoad) {
       throw AudioServiceException('Failed to load the tanpura sample.');
     }

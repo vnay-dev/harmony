@@ -46,8 +46,8 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Harmony needs the microphone to detect your singing pitch.</string>
+	<string>Harmony needs the microphone to detect your singing pitch in Find My Shruti.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Harmony uses speech recognition so you can answer yes, no, comfortable, or not comfortable.</string>
+	<string>Harmony uses speech recognition in Find My Shruti so you can answer yes, no, comfortable, or not comfortable.</string>
 </dict>
 </plist>

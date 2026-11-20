@@ -42,6 +42,20 @@ void main() {
     expect(Pitch.defaultPitch.label, 'C');
   });
 
+  test('displayLabel uses the sharp symbol', () {
+    expect(Pitch.c.displayLabel, 'C');
+    expect(Pitch.cSharp.displayLabel, 'C♯');
+    expect(Pitch.fSharp.displayLabel, 'F♯');
+    expect(formatShrutiDisplayLabel('A#'), 'A♯');
+  });
+
+  test('spokenLabel expands sharp notes', () {
+    expect(Pitch.c.spokenLabel, 'C');
+    expect(Pitch.cSharp.spokenLabel, 'C sharp');
+    expect(Pitch.dSharp.spokenLabel, 'D sharp');
+    expect(formatShrutiSpokenLabel('G♯'), 'G sharp');
+  });
+
   test('next and previous step through the 12 pitches and wrap', () {
     expect(Pitch.c.next, Pitch.cSharp);
     expect(Pitch.c.previous, Pitch.b);

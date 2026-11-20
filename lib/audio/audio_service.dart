@@ -11,8 +11,8 @@ abstract class AudioService {
 
   /// Loads [assetPath] for looping playback.
   ///
-  /// If playback is already active, continues with the new sample. No-ops when
-  /// [assetPath] is already loaded.
+  /// Does not start or resume playback — callers must call [play] when audio
+  /// should continue. No-ops when [assetPath] is already loaded.
   Future<void> load(String assetPath);
 
   /// Starts (or resumes) looping playback of the loaded sample.

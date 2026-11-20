@@ -165,10 +165,7 @@ class _TutorPresenceCircleState extends State<TutorPresenceCircle>
 }
 
 class _PresencePainter extends CustomPainter {
-  const _PresencePainter({
-    required this.circleSize,
-    required this.listening,
-  });
+  const _PresencePainter({required this.circleSize, required this.listening});
 
   final double circleSize;
   final bool listening;

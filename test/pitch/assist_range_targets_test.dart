@@ -22,10 +22,7 @@ void main() {
 
     test('Upper Sa is one octave above Lower Sa', () {
       expect(targets.upperSaHz, frequencyHzForPitch(Pitch.cSharp, octave: 4));
-      expect(
-        targets.upperSaHz / targets.lowerSaHz,
-        closeTo(2.0, 0.0001),
-      );
+      expect(targets.upperSaHz / targets.lowerSaHz, closeTo(2.0, 0.0001));
       expect(targets.playbackPitchFor(AssistRangePoint.upperSa), Pitch.cSharp);
     });
 

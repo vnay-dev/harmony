@@ -17,7 +17,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('shows default Sa, play control, and Find my Shruti', (
+  testWidgets('shows default Sa and play control without Find my Shruti', (
     tester,
   ) async {
     await pumpApp(tester);
@@ -25,10 +25,13 @@ void main() {
     expect(find.text('C'), findsOneWidget);
     expect(find.bySemanticsLabel('Play'), findsOneWidget);
     expect(
-      find.text('Not sure which Shruti is right for you?'),
+      find.textContaining(
+        'What does Shruti mean in Indian music?',
+        findRichText: true,
+      ),
       findsOneWidget,
     );
-    expect(find.text('Find my Shruti'), findsOneWidget);
+    expect(find.text('Find my Shruti'), findsNothing);
   });
 
   testWidgets('tapping the pitch card opens all 12 notes', (tester) async {

@@ -6,11 +6,8 @@ import 'package:harmony/audio/audio_service.dart';
 
 /// [AudioService] backed by `just_audio` for looping tanpura sample playback.
 class JustAudioService implements AudioService {
-  JustAudioService({
-    AudioPlayer? player,
-    bool handleInterruptions = true,
-  }) : _player =
-           player ?? AudioPlayer(handleInterruptions: handleInterruptions);
+  JustAudioService({AudioPlayer? player, bool handleInterruptions = true})
+    : _player = player ?? AudioPlayer(handleInterruptions: handleInterruptions);
 
   final AudioPlayer _player;
   String? _currentAsset;
@@ -27,16 +24,12 @@ class JustAudioService implements AudioService {
       return;
     }
 
-    final wasPlaying = _player.playing;
-
     try {
+      // Load only — do not auto-resume. Callers decide whether to [play]
+      // after load so pause/epoch can cancel an in-flight sample swap.
       await _player.setAsset(assetPath);
       await _player.setLoopMode(LoopMode.one);
       _currentAsset = assetPath;
-      if (wasPlaying) {
-        // Resume after the sample swap; do not await play() (see [play]).
-        unawaited(_player.play());
-      }
     } catch (error, stackTrace) {
       _currentAsset = null;
       Error.throwWithStackTrace(

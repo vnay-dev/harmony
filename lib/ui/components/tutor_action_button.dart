@@ -12,6 +12,7 @@ class TutorActionButton extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.primary = true,
+    this.icon,
   });
 
   final String label;
@@ -19,6 +20,9 @@ class TutorActionButton extends StatefulWidget {
 
   /// When false, renders as an outlined secondary action.
   final bool primary;
+
+  /// Optional leading icon (e.g. play / pause on the result CTA).
+  final IconData? icon;
 
   @override
   State<TutorActionButton> createState() => _TutorActionButtonState();
@@ -44,7 +48,8 @@ class _TutorActionButtonState extends State<TutorActionButton>
   void didUpdateWidget(covariant TutorActionButton oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.label != widget.label ||
-        oldWidget.primary != widget.primary) {
+        oldWidget.primary != widget.primary ||
+        oldWidget.icon != widget.icon) {
       _fade
         ..value = 0
         ..forward();
@@ -66,6 +71,18 @@ class _TutorActionButtonState extends State<TutorActionButton>
       borderRadius: BorderRadius.circular(DesignTokens.radiusPill),
     );
 
+    final labelChild = widget.icon == null
+        ? Text(widget.label)
+        : Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon, size: 22),
+              const SizedBox(width: DesignTokens.spaceSm),
+              Flexible(child: Text(widget.label)),
+            ],
+          );
+
     final button = widget.primary
         ? FilledButton(
             key: ValueKey<String>('tutor-cta-${widget.label}'),
@@ -76,7 +93,7 @@ class _TutorActionButtonState extends State<TutorActionButton>
               shape: shape,
               textStyle: textStyle,
             ),
-            child: Text(widget.label),
+            child: labelChild,
           )
         : OutlinedButton(
             key: ValueKey<String>('tutor-cta-secondary-${widget.label}'),
@@ -87,7 +104,7 @@ class _TutorActionButtonState extends State<TutorActionButton>
               shape: shape,
               textStyle: textStyle,
             ),
-            child: Text(widget.label),
+            child: labelChild,
           );
 
     return FadeTransition(

@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:harmony/audio/reference_tone_temp_file.dart';
 import 'package:harmony/tutor/asset_tutor_voice.dart';
+import 'package:harmony/tutor/kitten_speech_text.dart';
 import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_voice.dart';
 
@@ -189,7 +190,10 @@ class HttpTutorVoice implements TutorVoice {
   }
 
   Future<Uint8List> _postSpeak(String text) async {
-    final payload = utf8.encode(jsonEncode(<String, String>{'text': text}));
+    final speechText = normalizeKittenSpeechText(text);
+    final payload = utf8.encode(
+      jsonEncode(<String, String>{'text': speechText}),
+    );
     final request = await _client.postUrl(_endpoint);
     request.persistentConnection = false;
     request.headers.contentType = ContentType.json;

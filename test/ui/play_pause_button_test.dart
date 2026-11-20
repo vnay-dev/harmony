@@ -72,9 +72,6 @@ void main() {
   testWidgets('hit target diameter matches the raised play button size', (
     tester,
   ) async {
-    expect(
-      PlayPauseButton.hitTargetDiameter,
-      DesignTokens.playButtonSize,
-    );
+    expect(PlayPauseButton.hitTargetDiameter, DesignTokens.playButtonSize);
   });
 }

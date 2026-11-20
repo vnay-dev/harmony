@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Kept while Find My Shruti is compile-gated off so Assist can ship
+         again without a manifest change. Runtime access is Assist-only. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <application
@@ -43,7 +45,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        <!-- Android 11+ hides speech recognizers unless this is declared. -->
+        <!-- Assist Mode speech answers. Kept with gated Find My Shruti. -->
         <intent>
             <action android:name="android.speech.RecognitionService"/>
         </intent>

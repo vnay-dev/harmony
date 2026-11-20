@@ -55,7 +55,8 @@ class DroneController extends ChangeNotifier {
   ///
   /// While paused, only app state changes. While playing, switches to the
   /// matching sample when one exists; otherwise pauses so audio does not
-  /// continue under the wrong pitch.
+  /// continue under the wrong pitch. Uses the same busy/epoch gate as
+  /// [togglePlayback] so [pausePlayback] can cancel an in-flight swap.
   Future<void> selectPitch(Pitch pitch) async {
     if (_selectedPitch == pitch) {
       return;
@@ -66,6 +67,11 @@ class DroneController extends ChangeNotifier {
     notifyListeners();
 
     if (!_isPlaying) {
+      return;
+    }
+
+    if (_isBusy) {
+      // Selection is updated; in-flight play/pause owns the player.
       return;
     }
 
@@ -84,15 +90,32 @@ class DroneController extends ChangeNotifier {
       return;
     }
 
+    final epoch = _playbackEpoch;
+    _isBusy = true;
+    notifyListeners();
+
     try {
       await _audioService.load(asset);
+      if (!_isPlaybackEpochCurrent(epoch)) {
+        await _audioService.pause();
+        _isPlaying = false;
+        return;
+      }
+      await _audioService.play();
+      if (!_isPlaybackEpochCurrent(epoch)) {
+        await _audioService.pause();
+        _isPlaying = false;
+        return;
+      }
+      _isPlaying = true;
     } on AudioServiceException catch (error) {
       _errorMessage = error.message;
       _isPlaying = _audioService.isPlaying;
-      notifyListeners();
     } catch (_) {
       _errorMessage = 'Failed to load the tanpura sample.';
       _isPlaying = _audioService.isPlaying;
+    } finally {
+      _isBusy = false;
       notifyListeners();
     }
   }

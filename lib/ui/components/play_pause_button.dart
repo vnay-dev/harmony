@@ -120,8 +120,7 @@ class _PlayPauseButtonState extends State<PlayPauseButton>
                     AnimatedBuilder(
                       animation: _rippleController,
                       builder: (context, child) {
-                        if (!widget.isPlaying &&
-                            _rippleController.value == 0) {
+                        if (!widget.isPlaying && _rippleController.value == 0) {
                           return const SizedBox.shrink();
                         }
                         return CustomPaint(
@@ -164,10 +163,7 @@ class _PlayPauseButtonState extends State<PlayPauseButton>
 
 /// Accepts hit tests only inside a circle; does not clip painting (shadows).
 class _CircularHitTarget extends SingleChildRenderObjectWidget {
-  const _CircularHitTarget({
-    required this.diameter,
-    required super.child,
-  });
+  const _CircularHitTarget({required this.diameter, required super.child});
 
   final double diameter;
 

@@ -166,8 +166,7 @@ void main() {
       );
       final data = ByteData.sublistView(wav);
       final sampleCount = data.getUint32(40, Endian.little) ~/ 2;
-      int sampleAt(int index) =>
-          data.getInt16(44 + index * 2, Endian.little);
+      int sampleAt(int index) => data.getInt16(44 + index * 2, Endian.little);
       final wrapJump = (sampleAt(0) - sampleAt(sampleCount - 1)).abs();
       final startJump = (sampleAt(1) - sampleAt(0)).abs();
       // Integer-cycle phase means the loop boundary is just another sample step.

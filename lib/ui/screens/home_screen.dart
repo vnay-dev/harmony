@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:google_fonts/google_fonts.dart';
 
+import 'package:harmony/app/app_config.dart';
 import 'package:harmony/audio/audio_service.dart';
 
 import 'package:harmony/audio/just_audio_service.dart';
@@ -20,6 +21,7 @@ class HomeScreen extends StatefulWidget {
     super.key,
     AudioService? audioService,
     this.assistModeBuilder,
+    this.enableFindMyShruti = AppConfig.enableFindMyShruti,
   }) : _audioService = audioService;
 
   final AudioService? _audioService;
@@ -27,6 +29,12 @@ class HomeScreen extends StatefulWidget {
   /// Optional Tutor Mode route body. Tests inject a screen that skips real
   /// Kitten model download; production uses [AssistModeScreen].
   final WidgetBuilder? assistModeBuilder;
+
+  /// Whether Find My Shruti is offered on this Home screen.
+  ///
+  /// Defaults to [AppConfig.enableFindMyShruti]. Tests may override to verify
+  /// both the gated launch UI and the preserved entry path.
+  final bool enableFindMyShruti;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -59,6 +67,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openAssistMode() async {
+    if (!widget.enableFindMyShruti) {
+      return;
+    }
+
     // Home Shruti belongs to this practice flow — stop it before Tutor Mode.
     await _controller.pausePlayback();
     if (!mounted) {
@@ -129,59 +141,93 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const Spacer(flex: 3),
                 Center(
-                  child: Text.rich(
-                    TextSpan(
-                      style: GoogleFonts.manrope(
+                  child: Builder(
+                    builder: (context) {
+                      final infoTextStyle = GoogleFonts.manrope(
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
                         color: DesignTokens.onSurface,
                         height: 1.3,
-                      ),
-                      children: [
-                        const TextSpan(
-                          text: 'Not sure which Shruti is right for you?',
-                        ),
-                        WidgetSpan(
-                          alignment: PlaceholderAlignment.middle,
-                          child: Semantics(
-                            button: true,
-                            label: 'What is Shruti?',
-                            child: IconButton(
-                              key: const ValueKey<String>('shruti-info-button'),
-                              tooltip: 'What is Shruti?',
-                              onPressed: () => ShrutiInfoSheet.show(context),
-                              icon: Icon(
-                                Icons.info_outline_rounded,
-                                size: 15,
-                                color: DesignTokens.onSurface.withValues(
-                                  alpha: 0.55,
+                      );
+                      final infoColor = infoTextStyle.color!;
+                      // Visible glyph stays compact; OverflowBox keeps a 44×44
+                      // tap target without stretching the text line height.
+                      const visibleIconSize = 18.0;
+                      const tapTargetSize = 44.0;
+                      return Text.rich(
+                        TextSpan(
+                          style: infoTextStyle,
+                          children: [
+                            const TextSpan(
+                              text: 'What does Shruti mean in Indian music?',
+                            ),
+                            WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: Semantics(
+                                button: true,
+                                label: 'What is Shruti?',
+                                child: SizedBox(
+                                  width: visibleIconSize + 4,
+                                  height: visibleIconSize,
+                                  child: OverflowBox(
+                                    minWidth: tapTargetSize,
+                                    maxWidth: tapTargetSize,
+                                    minHeight: tapTargetSize,
+                                    maxHeight: tapTargetSize,
+                                    alignment: Alignment.center,
+                                    child: IconButton(
+                                      key: const ValueKey<String>(
+                                        'shruti-info-button',
+                                      ),
+                                      tooltip: 'What is Shruti?',
+                                      onPressed: () =>
+                                          ShrutiInfoSheet.show(context),
+                                      icon: Icon(
+                                        Icons.info_outline_rounded,
+                                        size: visibleIconSize,
+                                        color: infoColor,
+                                      ),
+                                      style: IconButton.styleFrom(
+                                        foregroundColor: infoColor,
+                                        minimumSize: const Size(
+                                          tapTargetSize,
+                                          tapTargetSize,
+                                        ),
+                                        maximumSize: const Size(
+                                          tapTargetSize,
+                                          tapTargetSize,
+                                        ),
+                                        fixedSize: const Size(
+                                          tapTargetSize,
+                                          tapTargetSize,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        visualDensity: VisualDensity.standard,
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
-                              style: IconButton.styleFrom(
-                                foregroundColor: DesignTokens.onSurface
-                                    .withValues(alpha: 0.55),
-                                minimumSize: const Size(32, 32),
-                                maximumSize: const Size(32, 32),
-                                fixedSize: const Size(32, 32),
-                                padding: const EdgeInsets.only(left: 2),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                visualDensity: VisualDensity.compact,
-                              ),
                             ),
-                          ),
+                          ],
                         ),
-                      ],
+                        textAlign: TextAlign.center,
+                      );
+                    },
+                  ),
+                ),
+                if (widget.enableFindMyShruti) ...[
+                  const SizedBox(height: DesignTokens.spaceMd),
+                  Center(
+                    child: SecondaryPillButton(
+                      key: const ValueKey<String>('find-my-shruti-button'),
+                      label: 'Find my Shruti',
+                      onPressed: _openAssistMode,
                     ),
-                    textAlign: TextAlign.center,
                   ),
-                ),
-                const SizedBox(height: DesignTokens.spaceMd),
-                Center(
-                  child: SecondaryPillButton(
-                    label: 'Find my Shruti',
-                    onPressed: _openAssistMode,
-                  ),
-                ),
+                ],
                 const Spacer(flex: 1),
               ],
             ),

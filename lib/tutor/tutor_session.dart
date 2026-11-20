@@ -324,14 +324,19 @@ class TutorSession extends ChangeNotifier {
       }
     }
     if (_step == TutorStep.complete) {
+      final label = _engine.referencePitch.label;
       final line = activeDialogue?.text ?? lastVoiceLine;
       // Only keep a real completion transcript — never a leftover question line.
       if (line != null &&
           line.trim().isNotEmpty &&
-          line.startsWith(TutorDialogues.s39.text)) {
+          (TutorScripts.isCompletionLine(line, label) ||
+              line == TutorScripts.provisionalCompletion(label) ||
+              line.startsWith(TutorDialogues.s39.text))) {
         return line;
       }
-      return TutorScripts.completion(_engine.referencePitch.label);
+      return _engine.isProvisionalRecommendation
+          ? TutorScripts.provisionalCompletion(label)
+          : TutorScripts.completion(label);
     }
     if (_step == TutorStep.unresolved) {
       final line = activeDialogue?.text ?? lastVoiceLine;
@@ -386,12 +391,12 @@ class TutorSession extends ChangeNotifier {
     // Question steps mirror their spoken scripts when speech has not left a line.
     switch (_step) {
       case TutorStep.askLowerAudibility:
-        return TutorScripts.lowerAudibilityQuestion;
+        return _lowerSaFollowUpQuestion;
       case TutorStep.askMiddleComfort:
       case TutorStep.askUpperComfort:
         return TutorScripts.upperComfortQuestion;
       case TutorStep.offerDifferentSound:
-        return TutorScripts.offerDifferentSound;
+        return TutorScripts.noteDifficultyQuestion;
       default:
         return null;
     }
@@ -467,9 +472,9 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.exploreNextShruti:
         return _rangeActionHeadline();
       case TutorStep.offerDifferentSound:
-        return TutorScripts.offerDifferentSound;
+        return TutorScripts.noteDifficultyQuestion;
       case TutorStep.askLowerAudibility:
-        return TutorScripts.lowerAudibilityQuestion;
+        return _lowerSaFollowUpQuestion;
       case TutorStep.askMiddleComfort:
       case TutorStep.askUpperComfort:
         return 'How did that feel?';
@@ -507,7 +512,7 @@ class TutorSession extends ChangeNotifier {
       case TutorStep.stopped:
         return TutorScripts.sessionStoppedSupport;
       case TutorStep.offerDifferentSound:
-        return 'Say yes or no — or tap below.';
+        return 'Choose what feels closest — or tap below.';
       case TutorStep.startingNoteFailure:
       case TutorStep.testLower:
       case TutorStep.testMiddle:
@@ -525,7 +530,7 @@ class TutorSession extends ChangeNotifier {
   /// Stage 1 never shows a listen timer or progress ring.
   bool get showListenProgress => false;
 
-  /// Audibility CTAs — only while the question is still open for an answer.
+  /// Lower Sa follow-up CTAs — only while the question is still open.
   ///
   /// Cleared by [_claimQuestion] as soon as a tap/spoken answer is accepted so
   /// acknowledgement speech ("That's lovely.") never briefly re-shows the
@@ -533,7 +538,25 @@ class TutorSession extends ChangeNotifier {
   bool get showYesNoFallback =>
       _step == TutorStep.askLowerAudibility && _questionOpen;
 
-  /// Yes / No for trying a nearby sound. Separate from Lower Sa audibility.
+  /// Comfort-style Lower Sa wording when search posture places the candidate higher.
+  bool get usesLowerSaComfortQuestion => _engine.usesLowerSaComfortQuestion;
+
+  /// Spoken / on-screen Lower Sa follow-up for the current search posture.
+  String get _lowerSaFollowUpQuestion => usesLowerSaComfortQuestion
+      ? TutorScripts.lowerComfortQuestion
+      : TutorScripts.lowerAudibilityQuestion;
+
+  /// Yes label for the Lower Sa follow-up (audibility or comfort wording).
+  String get lowerSaYesLabel => usesLowerSaComfortQuestion
+      ? TutorScripts.ctaComfortable
+      : TutorScripts.ctaHeardClearly;
+
+  /// No label for the Lower Sa follow-up (audibility or comfort wording).
+  String get lowerSaNoLabel => usesLowerSaComfortQuestion
+      ? TutorScripts.ctaNotComfortable
+      : TutorScripts.ctaHardToHear;
+
+  /// Too-low / too-high / not-sure recovery choices after assisted practice.
   bool get showDifferentSoundChoice =>
       _step == TutorStep.offerDifferentSound &&
       _engine.uiPhase == AssistUiPhase.offeringEasierSound;
@@ -924,7 +947,8 @@ class TutorSession extends ChangeNotifier {
     }
   }
 
-  Future<void> answerDifferentSound(bool tryDifferentSound) async {
+  /// Handles a Stage 2 recovery difficulty choice.
+  Future<void> answerNoteDifficulty(AssistNoteDifficultyChoice choice) async {
     if (_engine.uiPhase != AssistUiPhase.offeringEasierSound ||
         _engine.isBusy ||
         !_claimQuestion()) {
@@ -935,21 +959,35 @@ class TutorSession extends ChangeNotifier {
     _listeningForSpeechAnswer = false;
     notifyListeners();
     unawaited(_speech.stop());
-    if (!tryDifferentSound) {
-      await _speakRecoveryDialogue(
-        'different-sound-no-${_engine.currentRound}-'
-        '${_engine.currentExploreCandidate?.label}',
-        TutorDialogues.s73,
-      );
-      if (!_isLive(token) ||
-          _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
-        return;
-      }
-      await _engine.declineDifferentSound();
-      return;
+
+    switch (choice) {
+      case AssistNoteDifficultyChoice.tooLow:
+        await _engine.reportNoteTooLowForVoice();
+      case AssistNoteDifficultyChoice.tooHigh:
+        await _engine.reportNoteTooHighForVoice();
+      case AssistNoteDifficultyChoice.notSure:
+        await _speakRecoveryDialogue(
+          'note-help-${_engine.currentRound}-'
+          '${_engine.currentExploreCandidate?.label}',
+          TutorDialogues.s73,
+        );
+        if (!_isLive(token) ||
+            _engine.uiPhase != AssistUiPhase.offeringEasierSound) {
+          return;
+        }
+        await _engine.requestGuidedNoteHelp();
     }
-    // Yes: no spoken acknowledgement — move straight to the nearby sound.
-    await _engine.acceptDifferentSound();
+  }
+
+  /// Legacy Yes/No wrapper — prefer [answerNoteDifficulty].
+  ///
+  /// Yes maps to too-low (explore higher); No maps to guided help.
+  Future<void> answerDifferentSound(bool tryDifferentSound) async {
+    await answerNoteDifficulty(
+      tryDifferentSound
+          ? AssistNoteDifficultyChoice.tooLow
+          : AssistNoteDifficultyChoice.notSure,
+    );
   }
 
   /// Speaks a recovery [TutorDialogue] atomically (text + audio from one id).
@@ -1048,6 +1086,17 @@ class TutorSession extends ChangeNotifier {
     _syncStepFromEngine();
     if (_engine.suppressNextRangeIntro) {
       _engine.consumeRangeIntroSuppression();
+      if (_engine.pendingNearbyRecoveryReassurance) {
+        _engine.consumeNearbyRecoveryReassurance();
+        await _voice.speakOnce(
+          'nearby-reassure-${_engine.currentRound}-'
+          '${_engine.currentExploreCandidate?.label}',
+          TutorScripts.tryDifferentNoteAfterStruggle,
+        );
+        if (!_isLive(token)) {
+          return;
+        }
+      }
       // Recovery path keeps a short listen cue; consent CTA is Stage 1 / first
       // Lower Sa only (shared S74 flow above).
       await _voice.speakOnce(
@@ -1276,9 +1325,15 @@ class TutorSession extends ChangeNotifier {
     }
     _setStep(TutorStep.complete);
     notifyListeners();
+    final label = _engine.referencePitch.label;
+    final line = _engine.isProvisionalRecommendation
+        ? TutorScripts.provisionalCompletion(label)
+        : TutorScripts.completion(label);
     await _voice.speakOnce(
-      'complete-${_engine.referencePitch.label}',
-      TutorScripts.completion(_engine.referencePitch.label),
+      _engine.isProvisionalRecommendation
+          ? 'provisional-complete-$label'
+          : 'complete-$label',
+      line,
     );
   }
 
@@ -1460,8 +1515,9 @@ class TutorSession extends ChangeNotifier {
         _questionOpen = true;
         _setStep(TutorStep.askLowerAudibility);
         await _voice.speakOnce(
-          'ask-lower-${_engine.currentRound}',
-          TutorScripts.lowerAudibilityQuestion,
+          'ask-lower-${_engine.currentRound}-'
+          '${_engine.searchMode.name}',
+          _lowerSaFollowUpQuestion,
         );
         unawaited(_listenForYesNoAnswer());
       case AssistUiPhase.awaitingPaComfort:
@@ -1488,27 +1544,18 @@ class TutorSession extends ChangeNotifier {
         _differentSoundChoiceReady = false;
         _setStep(TutorStep.offerDifferentSound);
         notifyListeners();
-        await _speakRecoveryDialogue(
-          'easier-${_engine.currentRound}-'
+        await _voice.speakOnce(
+          'note-difficulty-${_engine.currentRound}-'
           '${_engine.currentExploreCandidate?.label}-'
           '${_engine.currentRangePoint?.name}',
-          TutorDialogues.s70,
-        );
-        if (!_isLive(token)) {
-          return;
-        }
-        await _speakRecoveryDialogue(
-          'offer-sound-${_engine.currentRound}-'
-          '${_engine.currentExploreCandidate?.label}-'
-          '${_engine.currentRangePoint?.name}',
-          TutorDialogues.s71,
+          TutorScripts.noteDifficultyQuestion,
         );
         if (!_isLive(token)) {
           return;
         }
         _differentSoundChoiceReady = true;
         notifyListeners();
-        unawaited(_listenForDifferentSoundAnswer());
+      // Three-option recovery is tap-first; speech Yes/No is ambiguous here.
       case AssistUiPhase.refreshingStartingNote:
         _questionOpen = false;
         _stage1AutoRetryCount = 0;

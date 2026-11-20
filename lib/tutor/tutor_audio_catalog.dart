@@ -31,8 +31,14 @@ class TutorAudioCatalog {
     'B': 'S51',
   };
 
-  static final String _completionPrefix =
+  /// Legacy bundled completion: celebration clip + pitch-name clip.
+  static final String _legacyCompletionPrefix =
       '${TutorDialogues.s39.text} Your Shruti is ';
+
+  /// Current Kitten completion template (text / TTS; no bundled name clips).
+  static final RegExp _completionPattern = RegExp(
+    r'^Awesome\.\n(.+) is your comfortable Shruti to start singing\.$',
+  );
 
   /// Dialogue ids still needed for [TutorScripts.orientation], in speak order.
   ///
@@ -51,6 +57,9 @@ class TutorAudioCatalog {
     TutorScripts.letMeHelpYou,
     TutorScripts.assistedReady,
     TutorScripts.listenOnceMore,
+    TutorScripts.lowerComfortQuestion,
+    TutorScripts.noteDifficultyQuestion,
+    TutorScripts.tryDifferentNoteAfterStruggle,
     ...TutorScripts.orientation,
   };
 
@@ -99,10 +108,22 @@ class TutorAudioCatalog {
   }
 
   static List<String>? _completionAssetIds(String line) {
-    if (!line.startsWith(_completionPrefix) || !line.endsWith('.')) {
+    final current = _completionPattern.firstMatch(line);
+    if (current != null) {
+      final label = current.group(1)!;
+      if (!shrutiAssetIds.containsKey(label)) {
+        throw StateError('No tutor audio for Shruti "$label".');
+      }
+      // Spoken by Kitten/HTTP from the full transcript — no S39+name split.
+      return const <String>[];
+    }
+    if (!line.startsWith(_legacyCompletionPrefix) || !line.endsWith('.')) {
       return null;
     }
-    final label = line.substring(_completionPrefix.length, line.length - 1);
+    final label = line.substring(
+      _legacyCompletionPrefix.length,
+      line.length - 1,
+    );
     final pitchId = shrutiAssetIds[label];
     if (pitchId == null) {
       throw StateError('No tutor audio for Shruti "$label".');

@@ -6,6 +6,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:harmony/models/pitch.dart';
 import 'package:harmony/tutor/asset_tutor_voice.dart';
 import 'package:harmony/tutor/tutor_audio_catalog.dart';
+import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
 
 void main() {
@@ -234,33 +235,29 @@ void main() {
       );
     });
 
-    test('splits completion into the celebration and the Shruti name', () {
-      const names = <String>[
-        'S40',
-        'S41',
-        'S42',
-        'S43',
-        'S44',
-        'S45',
-        'S46',
-        'S47',
-        'S48',
-        'S49',
-        'S50',
-        'S51',
-      ];
-      final pitches = Pitch.values;
-      expect(pitches, hasLength(names.length));
-      for (var i = 0; i < pitches.length; i++) {
+    test('maps current completion lines as text-only for Kitten TTS', () {
+      for (final pitch in Pitch.values) {
         expect(
           TutorAudioCatalog.assetIdsForSpokenLine(
-            TutorScripts.completion(pitches[i].label),
+            TutorScripts.completion(pitch.label),
           ),
-          <String>['S39', names[i]],
-          reason: pitches[i].label,
+          isEmpty,
+          reason: pitch.label,
         );
       }
     });
+
+    test(
+      'still splits legacy Wonderful completion into celebration + name',
+      () {
+        expect(
+          TutorAudioCatalog.assetIdsForSpokenLine(
+            '${TutorDialogues.s39.text} Your Shruti is C#.',
+          ),
+          <String>['S39', 'S41'],
+        );
+      },
+    );
 
     test('maps Stage 1 failure spoken lines onto S70, S61', () {
       expect(TutorScripts.startingNoteGuided, <String>[
@@ -396,10 +393,11 @@ void main() {
       );
       expect(TutorAudioCatalog.isValidAssetId('S00'), isFalse);
       expect(TutorAudioCatalog.isValidAssetId('S54'), isFalse);
-      expect(TutorAudioCatalog.isValidAssetId('S77'), isFalse);
+      expect(TutorAudioCatalog.isValidAssetId('S59'), isFalse);
       expect(TutorAudioCatalog.isValidAssetId('S74'), isTrue);
       expect(TutorAudioCatalog.isValidAssetId('S75'), isTrue);
       expect(TutorAudioCatalog.isValidAssetId('S76'), isTrue);
+      expect(TutorAudioCatalog.isValidAssetId('S77'), isTrue);
     });
   });
 

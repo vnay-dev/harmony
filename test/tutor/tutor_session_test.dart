@@ -271,7 +271,10 @@ void main() {
       expect(voice.playedAssets, isNot(contains('S71')));
       expect(voice.spoken, isNot(contains("That's okay. Let's try again.")));
       expect(voice.spoken, isNot(contains('Take your time. You can do this.')));
-      expect(voice.spoken, isNot(contains(TutorScripts.offerDifferentSound)));
+      expect(
+        voice.spoken,
+        isNot(contains(TutorScripts.noteDifficultyQuestion)),
+      );
       expect(voice.spoken, isNot(contains('Just listen.')));
       expect(
         voice.spoken,
@@ -599,7 +602,9 @@ void main() {
         onPhase: (phase) async {
           if (phase == AssistUiPhase.listening && !engine.isExploringRange) {
             stage1Listens += 1;
-            if (stage1Listens == 1) {
+            // First silence → louder prompt + auto-retry. Second silence →
+            // ordinary Stage 1 failure / guided lines. Then succeed.
+            if (stage1Listens <= 2) {
               detectionService.emit(PitchReading.none);
             } else {
               await emitPitch(detectionService, Pitch.g);
@@ -614,10 +619,10 @@ void main() {
     addTearDown(tutor.dispose);
 
     await tutor.begin();
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
+    await waitUntil(() => engine.stage1Shruti == Pitch.g);
 
-    expect(stage1Listens, greaterThanOrEqualTo(2));
+    expect(stage1Listens, greaterThanOrEqualTo(3));
+    expect(voice.spoken, contains(TutorScripts.singALittleLouder));
     expect(voice.spoken, contains(TutorScripts.startingNoteGuided.first));
     expect(voice.spoken, contains(TutorScripts.startingNoteGuided[1]));
     final retryAt = voice.spoken.indexOf(TutorScripts.startingNoteGuided.first);
@@ -652,7 +657,10 @@ void main() {
           }
           if (phase == AssistUiPhase.listening && !engine.isExploringRange) {
             stage1Listens += 1;
-            if (stage1Listens <= 2) {
+            // Each user retry clears the louder-prompt latch, so silence lands:
+            // #1 louder auto-retry, #2 failure 1, #3 louder after CTA,
+            // #4 failure 2 (guided demo pending). After the demo, succeed.
+            if (stage1Listens <= 4) {
               detectionService.emit(PitchReading.none);
               return;
             }
@@ -1012,8 +1020,8 @@ void main() {
               engine.isExploringRange) {
             soloListens += 1;
             if (soloListens == 1) {
-              // Miss once so a retry reference + countdown runs.
-              detectionService.emit(PitchReading.none);
+              // Audible miss (not silence) so ordinary retry + countdown run.
+              await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
               return;
             }
             final hz = engine.currentRangeTargetHz;
@@ -1048,7 +1056,7 @@ void main() {
       addTearDown(() => tutor.removeListener(recordRetryTransition));
 
       await engine.startSession();
-      await Future<void>.delayed(Duration.zero);
+      await waitUntil(() => sawRetryCountdown);
 
       expect(collectingRetryTransition, isTrue);
       expect(sawRetryCountdown, isTrue);
@@ -2395,17 +2403,16 @@ void main() {
 
     await tutor.begin();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
 
     expect(voice.spoken, contains(TutorScripts.rangeRetryOnce));
     expect(voice.spoken, contains(TutorScripts.practiceTogether));
     expect(voice.spoken, contains(TutorScripts.singAlongWithMe));
     expect(voice.spoken, contains(TutorScripts.tryOnYourOwn));
-    expect(voice.spoken, contains(TutorScripts.makeThisEasier));
-    expect(voice.spoken, contains(TutorScripts.offerDifferentSound));
+    expect(voice.spoken, contains(TutorScripts.noteDifficultyQuestion));
     expect(
-      voice.spoken.indexOf(TutorScripts.makeThisEasier),
+      voice.spoken.indexOf(TutorScripts.noteDifficultyQuestion),
       greaterThan(voice.spoken.indexOf(TutorScripts.tryOnYourOwn)),
     );
     expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
@@ -2414,8 +2421,8 @@ void main() {
     expect(tutor.step, TutorStep.offerDifferentSound);
     expect(tutor.showDifferentSoundChoice, isTrue);
     expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
-    expect(tutor.headline, TutorScripts.offerDifferentSound);
-    expect(tutor.supportText, 'Say yes or no — or tap below.');
+    expect(tutor.headline, TutorScripts.noteDifficultyQuestion);
+    expect(tutor.supportText, 'Choose what feels closest — or tap below.');
     expect(tutor.canAnswerDifferentSound, isTrue);
   });
 
@@ -2451,7 +2458,7 @@ void main() {
 
     await engine.startSession();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
     expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
 
@@ -2500,7 +2507,7 @@ void main() {
 
     await engine.startSession();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
 
     matchAfterDecline = true;
@@ -2521,11 +2528,9 @@ void main() {
   });
 
   test(
-    'another struggle after a new sound returns to Stage 1 without welcome',
+    'another struggle after a new sound soft-completes without restart',
     () async {
       late final AssistModeController engine;
-      TutorJourneyStage? journeyDuringStepBack;
-      var resumed = false;
       engine = buildEngine(
         wait: (duration) async {
           if (engine.uiPhase == AssistUiPhase.assistedSinging) {
@@ -2538,56 +2543,52 @@ void main() {
             await emitPitch(detectionService, Pitch.c);
             return;
           }
-          if (!resumed) {
-            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
-            return;
-          }
-          final hz = engine.currentRangeTargetHz;
-          if (hz != null) {
-            await emitHz(detectionService, hz);
-          }
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
         },
       );
       addTearDown(engine.dispose);
-      late final TutorSession tutor;
-      voice.onSpeak = (text) async {
-        if (text != TutorScripts.stepBackToVoice) {
-          return;
-        }
-        journeyDuringStepBack = tutor.journeyStage;
-        resumed = true;
-        expect(engine.stage, AssistStage.findingStart);
-        expect(engine.uiPhase, AssistUiPhase.refreshingStartingNote);
-      };
-      tutor = buildTutor(engine);
+      final tutor = buildTutor(engine);
       addTearDown(tutor.dispose);
 
       await tutor.begin();
       await pumpUntil(
-        () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+        () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
       );
       expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
 
-      await tutor.answerDifferentSound(true);
+      // Exhaust guided help, then keep missing on the nearby recovery note.
+      await tutor.answerNoteDifficulty(AssistNoteDifficultyChoice.notSure);
       await pumpUntil(
-        () => engine.uiPhase == AssistUiPhase.awaitingLowerAudibility,
-        turns: 80,
+        () =>
+            tutor.canAnswerDifferentSound ||
+            engine.uiPhase == AssistUiPhase.completed,
+        turns: 120,
+      );
+      if (tutor.canAnswerDifferentSound) {
+        await tutor.answerNoteDifficulty(AssistNoteDifficultyChoice.notSure);
+      }
+      await pumpUntil(
+        () => engine.uiPhase == AssistUiPhase.completed,
+        turns: 120,
       );
 
-      expect(journeyDuringStepBack, isNull);
-      expect(voice.spoken, contains(TutorScripts.stepBackToVoice));
-      expect(tutor.journeyStage, TutorJourneyStage.exploreRange);
+      expect(engine.isProvisionalRecommendation, isTrue);
+      expect(engine.referencePitch, Pitch.c);
+      expect(tutor.step, TutorStep.complete);
+      expect(voice.spoken, contains(TutorScripts.provisionalCompletion('C')));
+      expect(
+        voice.spoken,
+        contains(TutorScripts.tryDifferentNoteAfterStruggle),
+      );
+      expect(voice.spoken, isNot(contains(TutorScripts.stepBackToVoice)));
       expect(
         voice.spoken.where((line) => line == TutorScripts.welcome.first),
-        hasLength(1),
-      );
-      expect(
-        voice.spoken.where((line) => line == TutorScripts.firstStepListen),
         hasLength(1),
       );
       expect(voice.spoken, isNot(contains(TutorScripts.unresolved.first)));
       expect(voice.spoken, isNot(contains(TutorScripts.unresolved.last)));
       expect(engine.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+      expect(engine.uiPhase, isNot(AssistUiPhase.refreshingStartingNote));
       expect(engine.isSessionActive, isTrue);
     },
   );
@@ -2613,7 +2614,7 @@ void main() {
 
     await engine.startSession();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
 
     await tutor.stop();
@@ -2658,7 +2659,7 @@ void main() {
 
     await engine.startSession();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
 
     matchNearby = true;
@@ -2703,7 +2704,7 @@ void main() {
 
     await engine.startSession();
     await pumpUntil(
-      () => voice.spoken.contains(TutorScripts.offerDifferentSound),
+      () => voice.spoken.contains(TutorScripts.noteDifficultyQuestion),
     );
 
     matchAfterDecline = true;

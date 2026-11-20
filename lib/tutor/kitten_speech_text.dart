@@ -15,14 +15,34 @@
 /// punctuation where the source has none, and does not stack pause markers on
 /// top of existing sentence or dialogue boundaries.
 String normalizeKittenSpeechText(String text) {
+  // Punctuation and Y-vowel fixes first so sharp expansion can leave a
+  // capital pitch letter (`C sharp`) for natural TTS pronunciation.
   final modulated = _modulateKittenPunctuation(text);
-  return modulated.replaceAllMapped(RegExp(r"\b([A-Z][a-z']*)\b"), (match) {
-    final word = match[1]!;
-    if (RegExp(r'[aeiouAEIOU]').hasMatch(word)) {
-      return word;
-    }
-    return word.toLowerCase();
-  });
+  final withoutSpelledY = modulated.replaceAllMapped(
+    RegExp(r"\b([A-Z][a-z']*)\b"),
+    (match) {
+      final word = match[1]!;
+      // Keep single pitch letters (C, D, …) and normal title-case vowels.
+      if (word.length == 1 || RegExp(r'[aeiouAEIOU]').hasMatch(word)) {
+        return word;
+      }
+      return word.toLowerCase();
+    },
+  );
+  return _expandSharpPitchLabels(withoutSpelledY);
+}
+
+/// Expands sharp pitch spellings so TTS says the full name.
+///
+/// `C#` / `C♯` → `C sharp`. Plain letter pitches (`C`, `D`, …) are unchanged.
+/// Already-spoken forms (`C sharp`) are left alone.
+String _expandSharpPitchLabels(String text) {
+  return text
+      .replaceAll('♯', '#')
+      .replaceAllMapped(
+        RegExp(r'([A-Ga-g])#'),
+        (match) => '${match[1]!.toUpperCase()} sharp',
+      );
 }
 
 /// Lightweight punctuation cues for Kitten/Kokoro prosody.

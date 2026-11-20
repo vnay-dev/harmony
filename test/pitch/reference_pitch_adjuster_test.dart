@@ -140,22 +140,19 @@ void main() {
     },
   );
 
-  test(
-    'in-range A3 against C3 adjusts upward instead of atBoundary',
-    () {
-      final ref = frequencyHzForPitch(Pitch.c);
-      final userA = frequencyHzForPitch(Pitch.a);
-      adjuster.start(ref);
+  test('in-range A3 against C3 adjusts upward instead of atBoundary', () {
+    final ref = frequencyHzForPitch(Pitch.c);
+    final userA = frequencyHzForPitch(Pitch.a);
+    adjuster.start(ref);
 
-      final result = adjuster.observe(userA);
+    final result = adjuster.observe(userA);
 
-      expect(result.kind, ReferenceMatchKind.adjusted);
-      expect(result.didAdjust, isTrue);
-      expect(result.centsFromReference, greaterThan(0));
-      expect(result.referenceFrequencyHz, greaterThan(ref));
-      expect(result.referenceFrequencyHz, lessThanOrEqualTo(userA));
-    },
-  );
+    expect(result.kind, ReferenceMatchKind.adjusted);
+    expect(result.didAdjust, isTrue);
+    expect(result.centsFromReference, greaterThan(0));
+    expect(result.referenceFrequencyHz, greaterThan(ref));
+    expect(result.referenceFrequencyHz, lessThanOrEqualTo(userA));
+  });
 
   test('reference cannot climb above supported maximum', () {
     final maxHz = frequencyHzForPitch(Pitch.b);

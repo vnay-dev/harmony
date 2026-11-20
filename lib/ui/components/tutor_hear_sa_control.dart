@@ -167,7 +167,10 @@ class _TravellingBorderPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
-    final rrect = RRect.fromRectAndRadius(rect.deflate(0.75), Radius.circular(radius));
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(0.75),
+      Radius.circular(radius),
+    );
     final path = Path()..addRRect(rrect);
 
     final base = Paint()

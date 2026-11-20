@@ -113,9 +113,7 @@ class AssistRangeTargets {
   /// Uses a logarithmic (cents) scale so the visual tracks musical distance.
   /// Returns `null` for invalid frequencies.
   double? guidePositionForHz(double frequencyHz) {
-    if (frequencyHz <= 0 ||
-        frequencyHz.isNaN ||
-        frequencyHz.isInfinite) {
+    if (frequencyHz <= 0 || frequencyHz.isNaN || frequencyHz.isInfinite) {
       return null;
     }
 

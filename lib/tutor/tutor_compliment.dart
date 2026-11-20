@@ -8,6 +8,7 @@ abstract final class TutorCompliment {
 
   /// Positive adjectives that receive the Stage 1 celebration treatment.
   static const List<String> words = <String>[
+    'Awesome',
     'Beautiful',
     'Wonderful',
     'Amazing',

@@ -65,6 +65,21 @@ enum AssistedSingResult {
   readyForSolo,
 }
 
+/// Explicit user choice after assisted practice still does not settle.
+///
+/// A failed pitch match alone never implies high or low — only these choices
+/// (or other reliable evidence) may change search direction.
+enum AssistNoteDifficultyChoice {
+  /// Explore higher Shruti candidates.
+  tooLow,
+
+  /// Explore lower Shruti candidates (or stop at last comfortable).
+  tooHigh,
+
+  /// Run another guided sing-along, then a solo attempt.
+  notSure,
+}
+
 /// How a struggled range point is being taught.
 ///
 /// These modes must stay distinct. Pitch matching is only valid in [normal]
@@ -157,9 +172,10 @@ enum AssistUiPhase {
   /// Climbing stopped at a strained Upper Sa; last comfortable is ready.
   rangeBoundaryReached,
 
-  /// Assisted practice still did not settle. Ask about a nearby sound.
+  /// Assisted practice still did not settle. Ask what feels difficult.
   ///
-  /// Pitch matching stays off. The range loop waits for Yes or No.
+  /// Pitch matching stays off. The range loop waits for too-low / too-high /
+  /// not-sure before changing search direction or guiding again.
   offeringEasierSound,
 
   /// Repeated difficulty after a nearby sound. Capture a fresh starting note.

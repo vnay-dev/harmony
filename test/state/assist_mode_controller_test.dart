@@ -453,8 +453,17 @@ void main() {
     expect(controller.uiPhase, AssistUiPhase.completed);
     expect(controller.referencePitch, Pitch.d);
     expect(controller.isReferencePlaying, isTrue);
+    expect(controller.completionPlaybackReady, isTrue);
     expect(audioService.isPlaying, isTrue);
     expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.d));
+
+    await controller.toggleConfirmedShrutiPlayback();
+    expect(controller.isReferencePlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+
+    await controller.toggleConfirmedShrutiPlayback();
+    expect(controller.isReferencePlaying, isTrue);
+    expect(audioService.isPlaying, isTrue);
   });
 
   test(
@@ -484,6 +493,7 @@ void main() {
           hookEntered = true;
           playCountAtHook = audioService.playCount;
           expect(audioService.isPlaying, isFalse);
+          expect(controller.completionPlaybackReady, isFalse);
           await holdSpeech.future;
         },
       );
@@ -496,6 +506,7 @@ void main() {
       expect(playCountAtHook, 0);
       expect(audioService.isPlaying, isFalse);
       expect(audioService.playCount, 0);
+      expect(controller.completionPlaybackReady, isFalse);
 
       holdSpeech.complete();
       await finish;
@@ -503,6 +514,7 @@ void main() {
       expect(audioService.isPlaying, isTrue);
       expect(audioService.playCount, greaterThan(0));
       expect(controller.referencePitch, Pitch.d);
+      expect(controller.completionPlaybackReady, isTrue);
     },
   );
 

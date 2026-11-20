@@ -18,10 +18,13 @@ void main() {
     expect(DesignTokens.fontSizeDisplay, 32);
   });
 
-  test('listeningAccent stays in the warm listening family, not blue accent', () {
-    expect(DesignTokens.listeningAccent, isNot(DesignTokens.accent));
-    expect(DesignTokens.listeningAccent, isNot(DesignTokens.listeningEdge));
-    // Soft apricot between rim and edge — lighter than the orb's darkest rim.
-    expect(DesignTokens.listeningAccent, const Color(0xFFE5B584));
-  });
+  test(
+    'listeningAccent stays in the warm listening family, not blue accent',
+    () {
+      expect(DesignTokens.listeningAccent, isNot(DesignTokens.accent));
+      expect(DesignTokens.listeningAccent, isNot(DesignTokens.listeningEdge));
+      // Soft apricot between rim and edge — lighter than the orb's darkest rim.
+      expect(DesignTokens.listeningAccent, const Color(0xFFE5B584));
+    },
+  );
 }

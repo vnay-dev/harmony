@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:harmony/models/pitch.dart';
 import 'package:harmony/tutor/kitten_speech_text.dart';
 import 'package:harmony/tutor/tutor_dialogue.dart';
 import 'package:harmony/tutor/tutor_scripts.dart';
@@ -43,6 +44,34 @@ void main() {
         normalizeKittenSpeechText('Open the TTS menu.'),
         'Open the TTS menu.',
       );
+    });
+
+    test('expands sharp pitch labels so TTS says the full name', () {
+      expect(
+        normalizeKittenSpeechText(
+          'Awesome.\nC# is your comfortable Shruti to start singing.',
+        ),
+        'Awesome.\nC sharp is your comfortable Shruti to start singing.',
+      );
+      expect(
+        normalizeKittenSpeechText('Your Shruti is C♯.'),
+        'Your Shruti is C sharp.',
+      );
+      expect(normalizeKittenSpeechText('D# then F#.'), 'D sharp then F sharp.');
+      expect(
+        normalizeKittenSpeechText('Your Shruti is C.'),
+        'Your Shruti is C.',
+      );
+      expect(
+        normalizeKittenSpeechText('Your Shruti is C sharp.'),
+        'Your Shruti is C sharp.',
+      );
+      // Idempotent on already-spoken sharps (does not lowercase the pitch letter).
+      final once = normalizeKittenSpeechText(
+        TutorScripts.completion(Pitch.cSharp.label),
+      );
+      expect(once, contains('C sharp'));
+      expect(normalizeKittenSpeechText(once), once);
     });
 
     test('is idempotent', () {

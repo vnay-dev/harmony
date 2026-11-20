@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/material_symbols_icons.dart';
 
+import 'package:google_fonts/google_fonts.dart';
+
 import 'package:harmony/audio/audio_service.dart';
 import 'package:harmony/audio/just_audio_service.dart';
 import 'package:harmony/audio/reference_sound_generator.dart';
@@ -310,9 +312,13 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     _kittenBootstrap?.removeListener(_onChanged);
 
     final tutor = _tutor;
-    if (tutor != null &&
-        tutor.step != TutorStep.complete &&
-        tutor.step != TutorStep.stopped) {
+    final completedPitch = tutor != null && tutor.step == TutorStep.complete
+        ? _controller.referencePitch
+        : null;
+    if (completedPitch != null) {
+      // Leave result playback before Default Mode starts the same Shruti.
+      unawaited(_controller.pauseConfirmedShrutiPlayback());
+    } else if (tutor != null && tutor.step != TutorStep.stopped) {
       // Start cancellation without awaiting listen/wait teardown.
       unawaited(tutor.stop());
     }
@@ -321,7 +327,7 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     }
     final navigator = Navigator.of(context, rootNavigator: true);
     if (navigator.canPop()) {
-      navigator.pop();
+      navigator.pop<Pitch>(completedPitch);
     }
   }
 
@@ -347,42 +353,52 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
     final tutor = _tutor;
-    return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        title: Text(
-          'Tutor Mode',
-          style: textTheme.titleMedium?.copyWith(
-            color: colorScheme.onSurface.withValues(alpha: 0.62),
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        actions: [
-          if (tutor == null || tutor.showHome)
-            IconButton(
-              key: const ValueKey<String>('tutor-home'),
-              tooltip: 'Home',
-              onPressed: _goHome,
-              icon: Icon(
-                Icons.home_rounded,
-                color: colorScheme.onSurface.withValues(alpha: 0.55),
-              ),
+    return PopScope(
+      // System back must use the same teardown / result handoff as Home.
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          return;
+        }
+        _goHome();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          title: Text(
+            'Tutor Mode',
+            style: textTheme.titleMedium?.copyWith(
+              color: colorScheme.onSurface.withValues(alpha: 0.62),
+              fontWeight: FontWeight.w500,
             ),
-        ],
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(DesignTokens.spaceLg),
-          child: _awaitingKittenReady
-              ? _buildKittenReadyGate(context)
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(child: _buildTutorSurface(tutor!)),
-                    const SizedBox(height: DesignTokens.spaceMd),
-                    ..._buildActions(tutor),
-                  ],
+          ),
+          actions: [
+            if (tutor == null || tutor.showHome)
+              IconButton(
+                key: const ValueKey<String>('tutor-home'),
+                tooltip: 'Home',
+                onPressed: _goHome,
+                icon: Icon(
+                  Icons.home_rounded,
+                  color: colorScheme.onSurface.withValues(alpha: 0.55),
                 ),
+              ),
+          ],
+        ),
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(DesignTokens.spaceLg),
+            child: _awaitingKittenReady
+                ? _buildKittenReadyGate(context)
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: _buildTutorSurface(tutor!)),
+                      const SizedBox(height: DesignTokens.spaceMd),
+                      ..._buildActions(tutor),
+                    ],
+                  ),
+          ),
         ),
       ),
     );
@@ -475,9 +491,10 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
 
   /// Circle slot above an independent transcript region.
   ///
-  /// Shared by Stage 1, Stage 2, and terminal states so the calm circle +
-  /// dialogue composition never flips to the old headline surface.
+  /// Shared by Stage 1 and Stage 2. The final result screen replaces the
+  /// talking circle with the discovered Shruti.
   Widget _buildTutorSurface(TutorSession tutor) {
+    final isResult = tutor.confirmedShrutiLabel != null;
     return LayoutBuilder(
       builder: (context, constraints) {
         return SingleChildScrollView(
@@ -486,28 +503,32 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                RepaintBoundary(
-                  child: SizedBox(
-                    height: TutorPresenceCircle.slotSize,
-                    width: double.infinity,
-                    child: Center(
-                      child: TutorPresenceCircle(
-                        state: tutor.presenceState,
-                        voiceLevel: _controller.voiceActivity,
+                if (!isResult)
+                  RepaintBoundary(
+                    child: SizedBox(
+                      height: TutorPresenceCircle.slotSize,
+                      width: double.infinity,
+                      child: Center(
+                        child: TutorPresenceCircle(
+                          state: tutor.presenceState,
+                          voiceLevel: _controller.voiceActivity,
+                        ),
                       ),
                     ),
                   ),
-                ),
                 // Supporting Stage 2 listen cue — keeps circle + dialogue hierarchy.
-                if (_controller.uiPhase == AssistUiPhase.listening &&
+                if (!isResult &&
+                    _controller.uiPhase == AssistUiPhase.listening &&
                     _controller.isExploringRange) ...[
                   const SizedBox(height: DesignTokens.spaceMd),
                   PitchDirectionDial(
                     centsFromTarget: _controller.liveCentsFromTarget,
                   ),
                   const SizedBox(height: DesignTokens.spaceMd),
-                ] else
-                  const SizedBox(height: DesignTokens.spaceLg),
+                ] else if (!isResult)
+                  const SizedBox(height: DesignTokens.spaceLg)
+                else
+                  const SizedBox(height: DesignTokens.spaceXl),
                 _TutorDialogueContent(tutor: tutor),
               ],
             ),
@@ -518,25 +539,30 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
   }
 
   List<Widget> _buildActions(TutorSession tutor) {
-    // Terminal CTAs stay available even if completion speech is finishing.
+    // Result CTAs wait for dialogue + transcript AND the auto-play attempt.
+    // Never show disabled buttons while speech is still finishing.
     if (tutor.showPlayMyShruti) {
+      if (tutor.isSpeaking || !_controller.completionPlaybackReady) {
+        return const [];
+      }
+      final playing = _controller.isReferencePlaying;
       return [
         TutorActionButton(
-          key: const ValueKey<String>('assist-play-my-shruti'),
-          label: 'Play My Shruti',
-          onPressed: tutor.isSpeaking
-              ? null
-              : () {
-                  final pitch = _controller.referencePitch;
-                  Navigator.of(context).pop<Pitch>(pitch);
-                },
+          key: ValueKey<String>(
+            playing ? 'assist-pause-shruti' : 'assist-play-shruti',
+          ),
+          label: playing ? 'Pause Shruti' : 'Play Shruti',
+          icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+          onPressed: () {
+            unawaited(_controller.toggleConfirmedShrutiPlayback());
+          },
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
           key: const ValueKey<String>('assist-try-again'),
           label: 'Try Again',
           primary: false,
-          onPressed: tutor.isSpeaking ? null : tutor.tryAgain,
+          onPressed: tutor.tryAgain,
         ),
       ];
     }
@@ -560,16 +586,35 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       final canAnswer = tutor.canAnswerDifferentSound;
       return [
         TutorActionButton(
-          key: const ValueKey<String>('assist-different-sound-yes'),
-          label: 'Yes',
-          onPressed: canAnswer ? () => tutor.answerDifferentSound(true) : null,
+          key: const ValueKey<String>('assist-note-too-low'),
+          label: TutorScripts.ctaNoteTooLow,
+          onPressed: canAnswer
+              ? () => tutor.answerNoteDifficulty(
+                  AssistNoteDifficultyChoice.tooLow,
+                )
+              : null,
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
-          key: const ValueKey<String>('assist-different-sound-no'),
-          label: 'No',
+          key: const ValueKey<String>('assist-note-too-high'),
+          label: TutorScripts.ctaNoteTooHigh,
           primary: false,
-          onPressed: canAnswer ? () => tutor.answerDifferentSound(false) : null,
+          onPressed: canAnswer
+              ? () => tutor.answerNoteDifficulty(
+                  AssistNoteDifficultyChoice.tooHigh,
+                )
+              : null,
+        ),
+        const SizedBox(height: DesignTokens.spaceMd),
+        TutorActionButton(
+          key: const ValueKey<String>('assist-note-not-sure'),
+          label: TutorScripts.ctaNoteNotSure,
+          primary: false,
+          onPressed: canAnswer
+              ? () => tutor.answerNoteDifficulty(
+                  AssistNoteDifficultyChoice.notSure,
+                )
+              : null,
         ),
       ];
     }
@@ -578,13 +623,13 @@ class _AssistModeScreenState extends State<AssistModeScreen> {
       return [
         TutorActionButton(
           key: const ValueKey<String>('assist-lower-audible-yes'),
-          label: TutorScripts.ctaHeardClearly,
+          label: tutor.lowerSaYesLabel,
           onPressed: () => tutor.answerLowerAudibility(true),
         ),
         const SizedBox(height: DesignTokens.spaceMd),
         TutorActionButton(
           key: const ValueKey<String>('assist-lower-too-low'),
-          label: TutorScripts.ctaHardToHear,
+          label: tutor.lowerSaNoLabel,
           primary: false,
           onPressed: () => tutor.answerLowerAudibility(false),
         ),
@@ -650,23 +695,31 @@ class _TutorDialogueContent extends StatelessWidget {
     final dialogue = tutor.dialogueText;
     final showExample = tutor.showHearSa;
     final confirmed = tutor.confirmedShrutiLabel;
+    final confirmedDisplay = confirmed == null
+        ? null
+        : formatShrutiDisplayLabel(confirmed);
     final showReferenceListenCue =
         dialogue == TutorScripts.referenceListenPrompt;
 
     // Completion already emphasizes the Shruti name; let dialogue size naturally.
     final useFixedDialogueSlot = confirmed == null;
 
-    final dialogueText = dialogue == null
+    // Result screen pretty-prints sharps; spoken transcript still uses C#.
+    final displayDialogue = dialogue == null
+        ? null
+        : (confirmed == null ? dialogue : formatShrutiDisplayLabel(dialogue));
+
+    final dialogueText = displayDialogue == null
         ? const SizedBox.shrink()
         : TutorDialogueText(
             // Key by the on-screen text (not stale activeDialogue id) so a
             // leftover countdown id such as S09 cannot keep a widget alive
             // across the listen-prompt → countdown transition.
             key: ValueKey<String>(
-              'tutor-dialogue-$dialogue'
+              'tutor-dialogue-$displayDialogue'
               '${tutor.isDialogueInstruction ? '-hint' : ''}',
             ),
-            text: dialogue,
+            text: displayDialogue,
             isSpeaking: tutor.isSpeaking,
             isInstruction: tutor.isDialogueInstruction,
             holdReveal: tutor.isHoldingTranscript,
@@ -699,17 +752,22 @@ class _TutorDialogueContent extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (confirmed != null) ...[
+        if (confirmedDisplay != null) ...[
           ShrutiRevealCelebration(
             key: ValueKey<String>('assist-shruti-celebration-$confirmed'),
             child: Text(
-              confirmed,
+              confirmedDisplay,
               key: const ValueKey<String>('assist-confirmed-shruti'),
-              style: Theme.of(context).textTheme.displaySmall,
+              style: GoogleFonts.fraunces(
+                fontSize: DesignTokens.fontSizePitch,
+                fontWeight: FontWeight.w400,
+                height: 1,
+                color: DesignTokens.onSurface,
+              ),
               textAlign: TextAlign.center,
             ),
           ),
-          const SizedBox(height: DesignTokens.spaceMd),
+          const SizedBox(height: DesignTokens.spaceLg),
         ],
         if (useFixedDialogueSlot)
           SizedBox(

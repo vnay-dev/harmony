@@ -98,6 +98,8 @@ class MicPitchDetectionService implements PitchDetectionService {
               stackTrace,
             );
           }
+          // Do not leave the recorder running after a stream failure.
+          unawaited(stop());
         },
       );
     } on PitchDetectionException {

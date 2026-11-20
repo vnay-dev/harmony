@@ -114,15 +114,18 @@ class SynthesizedReferenceSoundGenerator implements ReferenceSoundGenerator {
       // just_audio's play() Future completes when playback ends; do not await
       // so Assist Mode can own the play window timing.
       unawaited(
-        _player.play().then((_) {
-          _diag('playFuture=completed');
-        }).catchError((Object error, StackTrace stackTrace) {
-          _diagError(
-            step: 'playFuture',
-            error: error,
-            stackTrace: stackTrace,
-          );
-        }),
+        _player
+            .play()
+            .then((_) {
+              _diag('playFuture=completed');
+            })
+            .catchError((Object error, StackTrace stackTrace) {
+              _diagError(
+                step: 'playFuture',
+                error: error,
+                stackTrace: stackTrace,
+              );
+            }),
       );
       _diag('play=success');
       _diag(
@@ -195,7 +198,9 @@ class SynthesizedReferenceSoundGenerator implements ReferenceSoundGenerator {
   }
 
   void _diag(String message) {
-    debugPrint('ReferenceToneDiag $message');
+    if (kDebugMode) {
+      debugPrint('ReferenceToneDiag $message');
+    }
   }
 
   void _diagError({
