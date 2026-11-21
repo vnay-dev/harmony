@@ -1,0 +1,191 @@
+/// Configurable timings for Assist Mode discrete rounds.
+class AssistTimingConfig {
+  const AssistTimingConfig({
+    this.referencePlayDuration = const Duration(seconds: 5),
+    this.settlingDuration = const Duration(milliseconds: 600),
+    this.listenDuration = const Duration(seconds: 8),
+    this.transitionDuration = Duration.zero,
+    this.stage2EntryTransitionDuration = const Duration(milliseconds: 1),
+    this.countdownStepDuration = const Duration(seconds: 1),
+    this.assistedSingDuration = const Duration(seconds: 6),
+  });
+
+  /// How long a Stage 2 reference tone plays before singing.
+  final Duration referencePlayDuration;
+
+  /// Silence after stopping reference audio before mic analysis starts.
+  final Duration settlingDuration;
+
+  /// How long the user should sing while Harmony listens.
+  final Duration listenDuration;
+
+  /// Hold after a singing result is already decided, before the next phase.
+  ///
+  /// Defaults to zero so the next instruction is not delayed. Listening,
+  /// reference playback, settling, and countdown use their own timers.
+  final Duration transitionDuration;
+
+  /// Hold while publishing Stage 2 entry phases after the opening dialogue.
+  ///
+  /// The opening line already finished in afterListenWindow, so this is only a
+  /// brief yield for phase observers — not a user-facing pause.
+  final Duration stage2EntryTransitionDuration;
+
+  /// Duration for each spoken/visual countdown step (3, 2, 1).
+  final Duration countdownStepDuration;
+
+  /// How long the reference stays audible while the user sings along.
+  ///
+  /// Defaults to 6 seconds so solo listen changes do not lengthen practice.
+  /// Pass `null` to fall back to [listenDuration] (useful for fast tests).
+  final Duration? assistedSingDuration;
+
+  /// Assisted sing-along length. Pitch matching stays off for this whole window.
+  Duration get assistedSingWindow => assistedSingDuration ?? listenDuration;
+}
+
+/// Which 3, 2, 1 lead-in the tutor should speak.
+enum AssistCountdownKind {
+  /// Solo turn: first attempt or retry wording chosen from failure count.
+  soloRetry,
+
+  /// Sing-along turn: "Let's sing together in 3..."
+  singTogether,
+}
+
+/// Result of one assisted sing-along pass.
+///
+/// The practice window never scores the singer. [readyForSolo] means the
+/// reference has stopped and the caller should run the normal solo listen.
+enum AssistedSingResult {
+  /// Stop or a stale generation ended the pass.
+  stopped,
+
+  /// Practice finished with pitch matching still off. Solo verification follows.
+  readyForSolo,
+}
+
+/// Explicit user choice after assisted practice still does not settle.
+///
+/// A failed pitch match alone never implies high or low — only these choices
+/// (or other reliable evidence) may change search direction.
+enum AssistNoteDifficultyChoice {
+  /// Explore higher Shruti candidates.
+  tooLow,
+
+  /// Explore lower Shruti candidates (or stop at last comfortable).
+  tooHigh,
+
+  /// Run another guided sing-along, then a solo attempt.
+  notSure,
+}
+
+/// How a struggled range point is being taught.
+///
+/// These modes must stay distinct. Pitch matching is only valid in [normal]
+/// and [assistedVerification], never while the reference is still playing.
+enum AssistRecoveryMode {
+  /// Reference has stopped. The user sings alone and matching may succeed.
+  normal,
+
+  /// Reference is playing for the user to follow. Matching must not succeed.
+  assistedSinging,
+
+  /// Reference has stopped and the room is settling before solo verification.
+  assistedVerification,
+}
+
+/// Which Assist Mode stage is active.
+enum AssistStage {
+  /// Stage 1: capture a comfortable starting note from the user's voice.
+  findingStart,
+
+  /// Stage 2: guided Lower Sa → Pa → Upper Sa range check.
+  exploringRange,
+}
+
+/// Stage 2 search posture while looking for one comfortable Shruti.
+enum AssistShrutiSearchMode {
+  /// Testing the Stage 1 starting candidate.
+  initial,
+
+  /// At least one comfortable found; climb until Upper Sa is strained.
+  climbing,
+
+  /// Lower Sa was too low; find the first fully comfortable Shruti upward.
+  seekingHigher,
+
+  /// Upper Sa was too high with no prior comfortable; find first fit downward.
+  seekingLower,
+}
+
+/// Presentation phases for Assist Mode V2 discrete rounds.
+enum AssistUiPhase {
+  /// Pre-session introduction.
+  intro,
+
+  /// Spoken + visual countdown before listening (3…2…1).
+  countdown,
+
+  /// Reference tone is playing; pitch analysis is off (Stage 2).
+  playingReference,
+
+  /// Settling before mic analysis.
+  preparingToListen,
+
+  /// User should sing; pitch analysis is on. Reference audio is stopped.
+  listening,
+
+  /// Reference stays audible so the user can sing along. Pitch matching is off.
+  assistedSinging,
+
+  /// Listening ended; computing next step (no analysis).
+  processing,
+
+  /// Friendly pause before the next play phase.
+  showingTransition,
+
+  /// Legacy Stage 1 verify phase (unused in voice-only discovery).
+  verifying,
+
+  /// Not enough stable singing; ask to try again.
+  retry,
+
+  /// Stage 1 starting candidate found; introducing Stage 2.
+  startingPointFound,
+
+  /// Legacy unused phase (kept out of new flow).
+  awaitingComfort,
+
+  /// Lower Sa matched; waiting for audibility Yes / Too low.
+  awaitingLowerAudibility,
+
+  /// Pa matched; waiting for Comfortable / Not comfortable.
+  awaitingPaComfort,
+
+  /// Upper Sa matched; waiting for Comfortable / Strained.
+  awaitingUpperComfort,
+
+  /// Introducing the next Shruti to test.
+  exploringNextShruti,
+
+  /// Climbing stopped at a strained Upper Sa; last comfortable is ready.
+  rangeBoundaryReached,
+
+  /// Assisted practice still did not settle. Ask what feels difficult.
+  ///
+  /// Pitch matching stays off. The range loop waits for too-low / too-high /
+  /// not-sure before changing search direction or guiding again.
+  offeringEasierSound,
+
+  /// Repeated difficulty after a nearby sound. Capture a fresh starting note.
+  ///
+  /// This is not a new session. Welcome and orientation are not replayed.
+  refreshingStartingNote,
+
+  /// No comfortable Shruti found within supported bounds.
+  rangeUnresolved,
+
+  /// Stage 2 finished (boundary acknowledged or top of range).
+  completed,
+}
