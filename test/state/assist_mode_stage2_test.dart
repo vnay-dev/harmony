@@ -1,0 +1,2279 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:harmony/models/pitch.dart';
+import 'package:harmony/pitch/frequency_to_note.dart';
+import 'package:harmony/pitch/pitch_detection_service.dart';
+import 'package:harmony/pitch/pitch_stability_tracker.dart';
+import 'package:harmony/pitch/stable_pitch_candidate_finder.dart';
+import 'package:harmony/pitch/target_pitch_matcher.dart';
+import 'package:harmony/state/assist_mode_controller.dart';
+import 'package:harmony/tutor/assist_tutor_hooks.dart';
+
+import '../support/fake_audio_service.dart';
+import '../support/fake_pitch_detection_service.dart';
+import '../support/fake_reference_sound_generator.dart';
+
+void main() {
+  late FakePitchDetectionService detectionService;
+  late FakeAudioService audioService;
+  late FakeReferenceSoundGenerator referenceSound;
+
+  const fastTiming = AssistTimingConfig(
+    referencePlayDuration: Duration(milliseconds: 1),
+    settlingDuration: Duration(milliseconds: 1),
+    listenDuration: Duration(milliseconds: 1),
+    transitionDuration: Duration(milliseconds: 1),
+    countdownStepDuration: Duration.zero,
+    assistedSingDuration: null,
+  );
+
+  StablePitchCandidateFinder buildFinder() {
+    return StablePitchCandidateFinder(
+      minStableSamples: 4,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+  }
+
+  TargetPitchMatcher buildMatcher() {
+    return TargetPitchMatcher(
+      toleranceCents: 50,
+      samplesToMatch: 4,
+      samplesToLoseMatch: 2,
+      stabilityTracker: PitchStabilityTracker(
+        samplesToBecomeStable: 3,
+        mismatchesToBecomeUnstable: 2,
+      ),
+    );
+  }
+
+  PitchReading voiced(double hz) {
+    return PitchReading(
+      hasPitch: true,
+      frequencyHz: hz,
+      note: noteFromFrequency(hz),
+    );
+  }
+
+  Future<void> emitPitch(
+    FakePitchDetectionService service,
+    Pitch pitch, {
+    int count = 12,
+  }) async {
+    final hz = frequencyHzForPitch(pitch);
+    for (var i = 0; i < count; i++) {
+      service.emit(voiced(hz));
+    }
+  }
+
+  Future<void> emitHz(
+    FakePitchDetectionService service,
+    double hz, {
+    int count = 12,
+  }) async {
+    for (var i = 0; i < count; i++) {
+      service.emit(voiced(hz));
+    }
+  }
+
+  Future<void> Function(Duration) phasedWait(
+    AssistModeController Function() controllerOf, {
+    Future<void> Function(AssistUiPhase phase)? onPhase,
+  }) {
+    return (duration) async {
+      final phase = controllerOf().uiPhase;
+      if (onPhase != null) {
+        await onPhase(phase);
+      }
+    };
+  }
+
+  /// Drives Stage 1 to [stage1Pitch], then Stage 2 with optional listen hook.
+  ///
+  /// Default Stage 2 singing matches the current range-point target Hz.
+  AssistModeController buildRangeController({
+    required Pitch stage1Pitch,
+    Future<void> Function(AssistModeController controller)? onRangeListening,
+    bool autoMatchRange = true,
+  }) {
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase != AssistUiPhase.listening) {
+            return;
+          }
+          if (controller.isExploringRange) {
+            if (onRangeListening != null) {
+              await onRangeListening(controller);
+              return;
+            }
+            if (autoMatchRange) {
+              final hz = controller.currentRangeTargetHz;
+              if (hz != null) {
+                await emitHz(detectionService, hz);
+              }
+            }
+            return;
+          }
+          await emitPitch(detectionService, stage1Pitch);
+        },
+      ),
+    );
+    return controller;
+  }
+
+  /// Completes Stage 2 with a valid recommendation: first candidate Upper Sa
+  /// Comfortable, next candidate Upper Sa Strained → final = first.
+  Future<void> finishCandidateAtUpperBoundary(
+    AssistModeController controller,
+  ) async {
+    var markedFirstComfortable = false;
+    for (var i = 0; i < 64; i++) {
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.awaitingLowerAudibility) {
+        await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingPaComfort) {
+        await controller.reportPaComfortable();
+      } else if (phase == AssistUiPhase.awaitingUpperComfort) {
+        if (!markedFirstComfortable) {
+          markedFirstComfortable = true;
+          await controller.reportUpperSaComfortable();
+        } else {
+          await controller.reportUpperSaStrained();
+        }
+      } else if (phase == AssistUiPhase.rangeBoundaryReached) {
+        await controller.acknowledgeRangeBoundary();
+      } else if (phase == AssistUiPhase.completed ||
+          phase == AssistUiPhase.intro ||
+          phase == AssistUiPhase.rangeUnresolved) {
+        return;
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+  }
+
+  /// Answers Lower Yes / Pa Comfortable when asked, then waits until Upper Sa
+  /// comfort is ready.
+  ///
+  /// While climbing, Lower Sa audibility is skipped — this still lands on
+  /// [AssistUiPhase.awaitingUpperComfort].
+  Future<void> reachUpperComfortQuestion(
+    AssistModeController controller,
+  ) async {
+    for (var i = 0; i < 64; i++) {
+      final phase = controller.uiPhase;
+      if (phase == AssistUiPhase.awaitingLowerAudibility) {
+        await controller.reportLowerSaAudible();
+      } else if (phase == AssistUiPhase.awaitingPaComfort) {
+        await controller.reportPaComfortable();
+      } else if (phase == AssistUiPhase.awaitingUpperComfort) {
+        return;
+      } else if (phase == AssistUiPhase.completed ||
+          phase == AssistUiPhase.rangeUnresolved ||
+          phase == AssistUiPhase.rangeBoundaryReached ||
+          phase == AssistUiPhase.intro) {
+        fail('Stopped at $phase before Upper Sa comfort');
+      } else {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    fail('Timed out waiting for Upper Sa comfort');
+  }
+
+  /// Answers Lower Yes so Pa matching can continue (initial only).
+  Future<void> answerLowerAudibleYes(AssistModeController controller) async {
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    await controller.reportLowerSaAudible();
+  }
+
+  /// Answers Pa Comfortable so Upper Sa matching can continue.
+  Future<void> answerPaComfortableYes(AssistModeController controller) async {
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    await controller.reportPaComfortable();
+  }
+
+  setUp(() {
+    detectionService = FakePitchDetectionService();
+    audioService = FakeAudioService();
+    referenceSound = FakeReferenceSoundGenerator();
+  });
+
+  test('C# Stage 1 creates Lower Sa target at C# octave 3', () async {
+    late final AssistModeController controller;
+    final hold = <AssistRangePoint?>[];
+    controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        hold.add(c.currentRangePoint);
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(hold.first, AssistRangePoint.lowerSa);
+    expect(
+      controller.rangeTargets?.lowerSaHz,
+      frequencyHzForPitch(Pitch.cSharp, octave: 3),
+    );
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.stage1Shruti, Pitch.cSharp);
+
+    await finishCandidateAtUpperBoundary(controller);
+    expect(controller.uiPhase, AssistUiPhase.completed);
+  });
+
+  test('Lower Sa matches and advances to Pa after audibility Yes', () async {
+    final seen = <AssistRangePoint>[];
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point != null && (seen.isEmpty || seen.last != point)) {
+          seen.add(point);
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(seen.first, AssistRangePoint.lowerSa);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+
+    await answerLowerAudibleYes(controller);
+
+    expect(seen, contains(AssistRangePoint.pa));
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+  });
+
+  test(
+    'liveCentsFromTarget follows the Stage 2 matcher while listening',
+    () async {
+      double? centsWhileListening;
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          final hz = c.currentRangeTargetHz;
+          if (hz == null) {
+            return;
+          }
+          // Enough samples for a stable cents reading, not enough to latch match.
+          final flatHz = hz * 0.985;
+          for (var i = 0; i < 5; i++) {
+            detectionService.emit(voiced(flatHz));
+          }
+          centsWhileListening ??= c.liveCentsFromTarget;
+          await emitHz(detectionService, hz);
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(centsWhileListening, isNotNull);
+      expect(centsWhileListening, lessThan(0));
+      expect(controller.liveCentsFromTarget, isNull);
+    },
+  );
+
+  test(
+    'range guide target moves LOW → MID → HIGH with current point',
+    () async {
+      final guideByPoint = <AssistRangePoint, double?>{};
+      final controller = buildRangeController(
+        // G wraps Pa into the next octave; marker must still leave LOW.
+        stage1Pitch: Pitch.g,
+        onRangeListening: (c) async {
+          final point = c.currentRangePoint;
+          if (point != null) {
+            guideByPoint.putIfAbsent(point, () => c.rangeTargetGuidePosition);
+          }
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.rangeTargetGuidePosition, 0.0);
+      expect(guideByPoint[AssistRangePoint.lowerSa], 0.0);
+
+      await answerLowerAudibleYes(controller);
+
+      expect(guideByPoint[AssistRangePoint.pa], 0.5);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(controller.currentRangePoint, AssistRangePoint.pa);
+      expect(controller.rangeTargetGuidePosition, 0.5);
+
+      await answerPaComfortableYes(controller);
+
+      expect(guideByPoint[AssistRangePoint.upperSa], 1.0);
+      expect(controller.currentRangePoint, AssistRangePoint.upperSa);
+      expect(controller.rangeTargetGuidePosition, 1.0);
+    },
+  );
+
+  test('Lower Sa = Yes continues to Pa comfort checkpoint', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+    expect(controller.usesLowerSaComfortQuestion, isFalse);
+
+    await controller.reportLowerSaAudible();
+
+    expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.activeCandidateResult?.paMatched, isTrue);
+    expect(controller.activeCandidateResult?.upperSaMatched, isNot(true));
+  });
+
+  test(
+    'Lower Sa uses comfort wording after seekingHigher, audibility for initial',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.searchMode, AssistShrutiSearchMode.initial);
+      expect(controller.usesLowerSaComfortQuestion, isFalse);
+
+      await controller.reportLowerSaTooLow();
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      expect(controller.usesLowerSaComfortQuestion, isTrue);
+      expect(controller.currentExploreCandidate, Pitch.cSharp);
+    },
+  );
+
+  test('Lower Sa keeps audibility wording while seekingLower', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.usesLowerSaComfortQuestion, isFalse);
+  });
+
+  test('Lower Sa = No rejects candidate and moves upward', () async {
+    final candidates = <Pitch>[];
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        final cand = c.currentExploreCandidate;
+        if (cand != null && (candidates.isEmpty || candidates.last != cand)) {
+          candidates.add(cand);
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.currentExploreCandidate, Pitch.c);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+
+    await controller.reportLowerSaTooLow();
+
+    expect(controller.testedCandidates.first.lowerSaAudible, isFalse);
+    expect(controller.testedCandidates.first.lowerSaMatched, isTrue);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(candidates, [Pitch.c, Pitch.cSharp]);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.lastComfortableShruti, isNull);
+  });
+
+  test('Upper Sa = Comfortable climbs and skips Lower Sa question', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.lastComfortableShruti, Pitch.c);
+    expect(controller.testedCandidates.first.upperSaComfortable, isTrue);
+    expect(controller.searchMode, AssistShrutiSearchMode.climbing);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    // Climbing skips re-asking Lower Sa — lands on Pa comfort first.
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+  });
+
+  test(
+    'pitch-correct middle note + Comfortable continues to Upper Sa',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await answerLowerAudibleYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(controller.activeCandidateResult?.paMatched, isTrue);
+
+      await controller.reportPaComfortable();
+
+      expect(controller.activeCandidateResult?.paComfortable, isTrue);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(controller.currentRangePoint, AssistRangePoint.upperSa);
+      expect(controller.searchMode, AssistShrutiSearchMode.initial);
+    },
+  );
+
+  test('pitch-correct middle note + Not comfortable seeks lower', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+
+    await controller.reportPaStrained();
+
+    expect(controller.testedCandidates.first.paComfortable, isFalse);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.currentExploreCandidate, Pitch.fSharp);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.uiPhase, isNot(AssistUiPhase.completed));
+  });
+
+  test(
+    'climbing Pa not comfortable finishes at last comfortable Shruti',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, Pitch.c);
+      expect(controller.searchMode, AssistShrutiSearchMode.climbing);
+
+      // Next candidate: Lower skipped, Pa matched → comfort question.
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      await controller.reportPaStrained();
+
+      expect(controller.uiPhase, AssistUiPhase.rangeBoundaryReached);
+      expect(controller.currentBoundaryShruti, Pitch.cSharp);
+      await controller.acknowledgeRangeBoundary();
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+    },
+  );
+
+  test(
+    'pitch-correct Upper Sa + Not comfortable uses existing strain path',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.g);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(controller.activeCandidateResult?.upperSaMatched, isTrue);
+
+      await controller.reportUpperSaStrained();
+
+      expect(controller.testedCandidates.first.upperSaComfortable, isFalse);
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+      expect(controller.currentExploreCandidate, Pitch.fSharp);
+    },
+  );
+
+  test('audible Lower Sa Yes continues normally to Pa', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+
+    await controller.reportLowerSaAudible();
+
+    expect(controller.activeCandidateResult?.lowerSaAudible, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.currentRangePoint, AssistRangePoint.pa);
+  });
+
+  test('pitch-correct Lower Sa + not audible seeks higher', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+
+    await controller.reportLowerSaTooLow();
+
+    expect(controller.testedCandidates.first.lowerSaAudible, isFalse);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+  });
+
+  test(
+    'pitch miss retries before feedback; feedback waits for a match',
+    () async {
+      var lowerMisses = 0;
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          if (c.currentRangePoint == AssistRangePoint.lowerSa) {
+            lowerMisses += 1;
+            if (lowerMisses == 1) {
+              // Wrong pitch — must retry, not ask feedback yet.
+              await emitHz(
+                detectionService,
+                frequencyHzForPitch(Pitch.g, octave: 3),
+              );
+              return;
+            }
+          }
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+
+      expect(lowerMisses, greaterThanOrEqualTo(2));
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      expect(controller.activeCandidateResult?.lowerSaMatched, isTrue);
+      expect(controller.activeCandidateResult?.lowerSaAudible, isNull);
+    },
+  );
+
+  test('C comfortable then C# strained → final Shruti is C', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.c);
+
+    await reachUpperComfortQuestion(controller);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.uiPhase, AssistUiPhase.rangeBoundaryReached);
+    expect(controller.currentBoundaryShruti, Pitch.cSharp);
+    expect(controller.lastComfortableShruti, Pitch.c);
+
+    await controller.acknowledgeRangeBoundary();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.c);
+    expect(controller.referencePitch, isNot(Pitch.cSharp));
+  });
+
+  test('C then C# comfortable, D strained → final Shruti is C#', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.c);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.cSharp);
+    expect(controller.currentExploreCandidate, Pitch.d);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.currentBoundaryShruti, Pitch.d);
+    expect(controller.lastComfortableShruti, Pitch.cSharp);
+
+    await controller.acknowledgeRangeBoundary();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.cSharp);
+    expect(controller.referencePitch, isNot(Pitch.d));
+  });
+
+  test('multiple comfortable candidates before strain', () async {
+    final comfortable = <Pitch>[];
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    for (final _ in [Pitch.c, Pitch.cSharp, Pitch.d]) {
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaComfortable();
+      comfortable.add(controller.lastComfortableShruti!);
+    }
+    expect(comfortable, [Pitch.c, Pitch.cSharp, Pitch.d]);
+    expect(controller.currentExploreCandidate, Pitch.dSharp);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.referencePitch, Pitch.d);
+    expect(controller.currentBoundaryShruti, Pitch.dSharp);
+  });
+
+  test(
+    'C Upper Sa strained with no lower Shruti → provisional Stage 1 seed',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await answerLowerAudibleYes(controller);
+      await answerPaComfortableYes(controller);
+      await controller.reportUpperSaStrained();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.currentBoundaryShruti, Pitch.c);
+      expect(controller.lastComfortableShruti, isNull);
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  // --- Product search examples ---
+
+  test(
+    'Example 1: G comfortable, G# comfortable, A strained → final G#',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.g);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, Pitch.g);
+
+      await reachUpperComfortQuestion(controller);
+      expect(controller.currentExploreCandidate, Pitch.gSharp);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, Pitch.gSharp);
+
+      await reachUpperComfortQuestion(controller);
+      expect(controller.currentExploreCandidate, Pitch.a);
+      await controller.reportUpperSaStrained();
+      await controller.acknowledgeRangeBoundary();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.gSharp);
+      expect(controller.currentBoundaryShruti, Pitch.a);
+    },
+  );
+
+  test('Example 2: G strained, F# comfortable → final F#', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.currentExploreCandidate, Pitch.fSharp);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.fSharp);
+    expect(controller.lastComfortableShruti, Pitch.fSharp);
+  });
+
+  test('Example 3: G too low, G# comfortable → final G#', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    await controller.reportLowerSaTooLow();
+
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.currentExploreCandidate, Pitch.gSharp);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.gSharp);
+  });
+
+  test('Example 4: G and G# too low, A comfortable → final A', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await controller.reportLowerSaTooLow();
+    expect(controller.currentExploreCandidate, Pitch.gSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+
+    await controller.reportLowerSaTooLow();
+    expect(controller.currentExploreCandidate, Pitch.a);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+  });
+
+  test('Example 5: G..A comfortable, A# strained → final A', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    for (final expected in [Pitch.g, Pitch.gSharp, Pitch.a]) {
+      await reachUpperComfortQuestion(controller);
+      expect(controller.currentExploreCandidate, expected);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, expected);
+    }
+
+    await reachUpperComfortQuestion(controller);
+    expect(controller.currentExploreCandidate, Pitch.aSharp);
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.a);
+    expect(controller.currentBoundaryShruti, Pitch.aSharp);
+  });
+
+  test('Example 6: C strained → provisional Stage 1 seed, no wrap', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.c);
+    expect(controller.isProvisionalRecommendation, isTrue);
+    expect(controller.testedCandidates.map((r) => r.shruti), [Pitch.c]);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+  });
+
+  test('Example 7: B comfortable → finish with B, no wrap to C', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.b);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.b);
+    expect(controller.lastComfortableShruti, Pitch.b);
+  });
+
+  test('Try Again resets search mode and candidate state', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.g);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+
+    await controller.tryAgain();
+
+    // Fresh Stage 2 session from the same Stage 1 pitch.
+    expect(controller.searchMode, AssistShrutiSearchMode.initial);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.currentBoundaryShruti, isNull);
+    expect(controller.stage1Shruti, Pitch.g);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.testedCandidates, hasLength(1));
+  });
+
+  test('strained candidate is never returned as final Shruti', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaComfortable();
+    await reachUpperComfortQuestion(controller);
+    final strained = controller.currentExploreCandidate!;
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.referencePitch, isNot(strained));
+    expect(controller.currentBoundaryShruti, strained);
+    expect(controller.referencePitch, controller.lastComfortableShruti);
+  });
+
+  test('user answers do not alter pitch detection matching logic', () async {
+    var wrongUpperAttempts = 0;
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (duration) async {
+        if (controller.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!controller.isExploringRange) {
+          await emitPitch(detectionService, Pitch.c);
+          return;
+        }
+        final point = controller.currentRangePoint;
+        if (point == AssistRangePoint.upperSa) {
+          wrongUpperAttempts += 1;
+          // Same pitch class, wrong octave — must not match.
+          await emitHz(
+            detectionService,
+            frequencyHzForPitch(Pitch.c, octave: 3),
+          );
+          return;
+        }
+        final hz = controller.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    // Lower audibility Yes must not change matching rules for Upper Sa.
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+
+    expect(wrongUpperAttempts, 3);
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.upperSaMatched, isNot(true));
+  });
+
+  test('back-to-back taps cannot trigger multiple Shruti advances', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+
+    final first = controller.reportUpperSaComfortable();
+    final second = controller.reportUpperSaComfortable();
+    await Future.wait<void>([first, second]);
+
+    expect(controller.testedCandidates, hasLength(2));
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.testedCandidates.map((r) => r.shruti).toList(), [
+      Pitch.c,
+      Pitch.cSharp,
+    ]);
+  });
+
+  test('no duplicate advancement when Lower Sa is too low', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    final first = controller.reportLowerSaTooLow();
+    final second = controller.reportLowerSaTooLow();
+    await Future.wait<void>([first, second]);
+
+    expect(controller.testedCandidates, hasLength(2));
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+  });
+
+  test('Lower Sa does not advance on the wrong pitch', () async {
+    var wrongListens = 0;
+    final points = <AssistRangePoint>[];
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point != null) {
+          points.add(point);
+        }
+        if (point == AssistRangePoint.lowerSa) {
+          wrongListens += 1;
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(wrongListens, 3);
+    expect(points.take(3).every((p) => p == AssistRangePoint.lowerSa), isTrue);
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.lowerSaMatched, isNot(true));
+  });
+
+  test('silence on Lower Sa is not a match', () async {
+    var lowerListens = 0;
+    var sawFailureBeforeRetry = false;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint != AssistRangePoint.lowerSa) {
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        lowerListens += 1;
+        if (c.rangePointFailureCount >= 1) {
+          sawFailureBeforeRetry = true;
+        }
+        // First silence → louder prompt retry; second silence → ordinary miss.
+        if (lowerListens <= 2) {
+          detectionService.emit(PitchReading.none);
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(lowerListens, greaterThanOrEqualTo(3));
+    expect(sawFailureBeforeRetry, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+  });
+
+  test('Stage 2 silence offers louder prompt and retries same point', () async {
+    var inaudibleCalls = 0;
+    var lowerListens = 0;
+    late final AssistModeController controller;
+    controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint != AssistRangePoint.lowerSa) {
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        lowerListens += 1;
+        expect(c.currentRangePoint, AssistRangePoint.lowerSa);
+        if (lowerListens == 1) {
+          expect(c.rangePointFailureCount, 0);
+          detectionService.emit(
+            const PitchReading(hasPitch: false, level: 0.01),
+          );
+          return;
+        }
+        if (lowerListens == 2) {
+          expect(inaudibleCalls, 1);
+          expect(c.rangePointFailureCount, 0);
+          expect(c.inaudibleLouderPromptUsed, isTrue);
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+    controller.tutorHooks = AssistTutorHooks(
+      onInaudibleListen: () async {
+        inaudibleCalls += 1;
+        expect(controller.rangePointFailureCount, 0);
+      },
+    );
+
+    await controller.startSession();
+
+    expect(inaudibleCalls, 1);
+    expect(lowerListens, greaterThanOrEqualTo(2));
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.rangePointFailureCount, 0);
+  });
+
+  test(
+    'Stage 2 audible wrong pitch skips louder prompt and keeps guidance',
+    () async {
+      var inaudibleCalls = 0;
+      var lowerListens = 0;
+      late final AssistModeController controller;
+      controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          if (c.currentRangePoint != AssistRangePoint.lowerSa) {
+            final hz = c.currentRangeTargetHz;
+            if (hz != null) {
+              await emitHz(detectionService, hz);
+            }
+            return;
+          }
+          lowerListens += 1;
+          if (lowerListens == 1) {
+            detectionService.emit(
+              PitchReading(
+                hasPitch: true,
+                frequencyHz: frequencyHzForPitch(Pitch.a),
+                note: Pitch.a,
+                level: 0.6,
+              ),
+            );
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+            return;
+          }
+          expect(c.rangePointFailureCount, 1);
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+      controller.tutorHooks = AssistTutorHooks(
+        onInaudibleListen: () async {
+          inaudibleCalls += 1;
+        },
+      );
+
+      await controller.startSession();
+
+      expect(inaudibleCalls, 0);
+      expect(lowerListens, 2);
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    },
+  );
+
+  test('Pa target is the correct fifth above Sa', () async {
+    AssistRangeTargets? seenTargets;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint == AssistRangePoint.pa) {
+          seenTargets = c.rangeTargets;
+          expect(
+            c.currentRangeTargetHz,
+            frequencyHzForPitch(Pitch.gSharp, octave: 3),
+          );
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+
+    expect(seenTargets?.paPitch, Pitch.gSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+  });
+
+  test('Pa does not advance on the wrong pitch', () async {
+    var paWrongAttempts = 0;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point == AssistRangePoint.pa) {
+          paWrongAttempts += 1;
+          await emitHz(
+            detectionService,
+            frequencyHzForPitch(Pitch.cSharp, octave: 3),
+          );
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+
+    expect(paWrongAttempts, 3);
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.paMatched, isNot(true));
+  });
+
+  test('successful Pa match awaits comfort before Upper Sa', () async {
+    final seen = <AssistRangePoint>[];
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point != null && (seen.isEmpty || seen.last != point)) {
+          seen.add(point);
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+
+    expect(seen, contains(AssistRangePoint.pa));
+    expect(seen, isNot(contains(AssistRangePoint.upperSa)));
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+    expect(controller.activeCandidateResult?.paMatched, isTrue);
+    expect(controller.activeCandidateResult?.paComfortable, isNull);
+
+    await answerPaComfortableYes(controller);
+
+    expect(seen, contains(AssistRangePoint.upperSa));
+    expect(
+      seen.indexOf(AssistRangePoint.pa),
+      lessThan(seen.indexOf(AssistRangePoint.upperSa)),
+    );
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.activeCandidateResult?.paComfortable, isTrue);
+  });
+
+  test('Upper Sa is one octave above Lower Sa', () async {
+    double? upperHz;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint == AssistRangePoint.upperSa) {
+          upperHz = c.currentRangeTargetHz;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+
+    expect(upperHz, frequencyHzForPitch(Pitch.cSharp, octave: 4));
+    expect(
+      upperHz! / frequencyHzForPitch(Pitch.cSharp, octave: 3),
+      closeTo(2.0, 0.0001),
+    );
+  });
+
+  test('Upper Sa does not advance on Lower Sa pitch', () async {
+    var upperWrongAttempts = 0;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point == AssistRangePoint.upperSa) {
+          upperWrongAttempts += 1;
+          await emitHz(
+            detectionService,
+            frequencyHzForPitch(Pitch.cSharp, octave: 3),
+          );
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+
+    expect(upperWrongAttempts, 3);
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.upperSaMatched, isNot(true));
+  });
+
+  test('successful Upper Sa match awaits comfort before completing', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.cSharp);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    expect(controller.stage1Shruti, Pitch.cSharp);
+    expect(controller.currentRangePoint, AssistRangePoint.upperSa);
+
+    await finishCandidateAtUpperBoundary(controller);
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.cSharp);
+  });
+
+  test('silence does not advance the target', () async {
+    var silentListens = 0;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint == AssistRangePoint.lowerSa) {
+          silentListens += 1;
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    // Each ordinary miss is preceded by one inaudible louder-prompt retry.
+    expect(silentListens, greaterThanOrEqualTo(3));
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.lowerSaMatched, isNot(true));
+  });
+
+  test('invalid pitch does not advance the target', () async {
+    var attempts = 0;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        if (c.currentRangePoint == AssistRangePoint.lowerSa) {
+          attempts += 1;
+          detectionService.emit(PitchReading.none);
+          detectionService.emit(
+            const PitchReading(hasPitch: true, frequencyHz: -1),
+          );
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(attempts, 3);
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.activeCandidateResult?.lowerSaMatched, isNot(true));
+  });
+
+  test('Tanpura playback does not enable pitch analysis', () async {
+    final analysisDuringPlay = <bool>[];
+    late final AssistModeController spying;
+    spying = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (duration) async {
+        if (spying.uiPhase == AssistUiPhase.playingReference) {
+          analysisDuringPlay.add(spying.isPitchAnalysisEnabled);
+        }
+        if (spying.uiPhase == AssistUiPhase.listening) {
+          if (!spying.isExploringRange) {
+            await emitPitch(detectionService, Pitch.cSharp);
+          } else {
+            final hz = spying.currentRangeTargetHz;
+            if (hz != null) {
+              await emitHz(detectionService, hz);
+            }
+          }
+        }
+      },
+    );
+    addTearDown(spying.dispose);
+
+    await spying.startSession();
+    await finishCandidateAtUpperBoundary(spying);
+
+    expect(analysisDuringPlay, isNotEmpty);
+    expect(analysisDuringPlay.every((enabled) => !enabled), isTrue);
+    expect(spying.uiPhase, AssistUiPhase.completed);
+  });
+
+  test('Try Again resets comfort state and range target to Lower Sa', () async {
+    final pointsAfterRetry = <AssistRangePoint?>[];
+    late final AssistModeController controller;
+    var pass = 0;
+    controller = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (duration) async {
+        if (controller.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!controller.isExploringRange) {
+          await emitPitch(detectionService, pass == 0 ? Pitch.e : Pitch.a);
+          return;
+        }
+        if (pass == 1 && pointsAfterRetry.isEmpty) {
+          pointsAfterRetry.add(controller.currentRangePoint);
+          expect(controller.stage1Shruti, Pitch.a);
+          expect(controller.lastComfortableShruti, isNull);
+          expect(controller.currentBoundaryShruti, isNull);
+          expect(controller.testedCandidates, hasLength(1));
+          expect(controller.testedCandidates.single.shruti, Pitch.a);
+        }
+        final hz = controller.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+    await controller.reportUpperSaComfortable();
+    expect(controller.lastComfortableShruti, Pitch.e);
+    expect(controller.testedCandidates, isNotEmpty);
+
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    expect(controller.currentBoundaryShruti, isNot(Pitch.e));
+    await controller.acknowledgeRangeBoundary();
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.e);
+    expect(controller.stage1Shruti, Pitch.e);
+
+    pass = 1;
+    await controller.tryAgain();
+    await finishCandidateAtUpperBoundary(controller);
+
+    expect(pointsAfterRetry.first, AssistRangePoint.lowerSa);
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.stage1Shruti, Pitch.a);
+    expect(controller.referencePitch, Pitch.a);
+    expect(controller.lastComfortableShruti, Pitch.a);
+    expect(controller.currentBoundaryShruti, isNot(Pitch.a));
+  });
+
+  test('range test stores flags without a numeric comfort score', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.cSharp);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+    await controller.reportUpperSaComfortable();
+    await reachUpperComfortQuestion(controller);
+    await controller.reportUpperSaStrained();
+    await controller.acknowledgeRangeBoundary();
+
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.stage1Shruti, Pitch.cSharp);
+    expect(controller.referencePitch, Pitch.cSharp);
+    expect(controller.testedCandidates, hasLength(2));
+    final first = controller.testedCandidates.first;
+    expect(first.shruti, Pitch.cSharp);
+    expect(first.lowerSaMatched, isTrue);
+    expect(first.lowerSaAudible, isTrue);
+    expect(first.paMatched, isTrue);
+    expect(first.paComfortable, isTrue);
+    expect(first.upperSaMatched, isTrue);
+    expect(first.upperSaComfortable, isTrue);
+    final boundary = controller.testedCandidates.last;
+    expect(boundary.upperSaComfortable, isFalse);
+    expect(controller.currentBoundaryShruti, boundary.shruti);
+  });
+
+  test('targets progress strictly Lower Sa → Pa → Upper Sa', () async {
+    final seen = <AssistRangePoint>[];
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.cSharp,
+      onRangeListening: (c) async {
+        final point = c.currentRangePoint;
+        if (point != null && (seen.isEmpty || seen.last != point)) {
+          seen.add(point);
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    expect(seen, [AssistRangePoint.lowerSa, AssistRangePoint.pa]);
+    expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+
+    await answerPaComfortableYes(controller);
+    expect(seen, [
+      AssistRangePoint.lowerSa,
+      AssistRangePoint.pa,
+      AssistRangePoint.upperSa,
+    ]);
+  });
+
+  test(
+    'Stage 2 C session plays Lower C, G, and Upper C reference Hz',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      expect(referenceSound.playedFrequencies, hasLength(1));
+
+      await answerLowerAudibleYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(referenceSound.playedFrequencies, hasLength(2));
+      expect(referenceSound.playedFrequencies[0], closeTo(130.81, 0.02));
+      expect(referenceSound.playedFrequencies[1], closeTo(196.00, 0.02));
+
+      await answerPaComfortableYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+      expect(referenceSound.playedFrequencies, hasLength(3));
+      expect(referenceSound.playedFrequencies[2], closeTo(261.63, 0.02));
+      expect(referenceSound.stopCount, greaterThanOrEqualTo(3));
+    },
+  );
+
+  test('Stage 2 range references do not load Stage 1 Tanpura assets', () async {
+    final controller = buildRangeController(stage1Pitch: Pitch.c);
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+
+    expect(referenceSound.playCount, 3);
+    expect(
+      referenceSound.playedFrequencies.toSet().length,
+      3,
+      reason: 'each range point must request a distinct frequency',
+    );
+    expect(
+      referenceSound.stopCount,
+      greaterThanOrEqualTo(referenceSound.playCount),
+    );
+  });
+
+  AssistModeController buildPaController({
+    required Future<void> Function(AssistModeController controller) onWait,
+  }) {
+    late final AssistModeController controller;
+    controller = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: (_) async {
+        await onWait(controller);
+      },
+    );
+    return controller;
+  }
+
+  Future<void> singCurrentTarget(AssistModeController controller) async {
+    final hz = controller.currentRangeTargetHz;
+    if (hz != null) {
+      await emitHz(detectionService, hz);
+    }
+  }
+
+  test(
+    'assisted practice does not score, then a solo match continues',
+    () async {
+      var paSolos = 0;
+      var assistedPasses = 0;
+      var analysisDuringAssist = true;
+      var matchedDuringAssist = false;
+      var analysisDuringSoloListen = false;
+
+      final controller = buildPaController(
+        onWait: (c) async {
+          if (c.uiPhase == AssistUiPhase.assistedSinging) {
+            assistedPasses += 1;
+            analysisDuringAssist = c.isPitchAnalysisEnabled;
+            expect(referenceSound.isPlaying, isTrue);
+            expect(c.recoveryMode, AssistRecoveryMode.assistedSinging);
+            await singCurrentTarget(c);
+            matchedDuringAssist = c.didMatchCurrentRangeTarget;
+            return;
+          }
+          if (c.uiPhase != AssistUiPhase.listening) {
+            return;
+          }
+          if (!c.isExploringRange) {
+            await emitPitch(detectionService, Pitch.cSharp);
+            return;
+          }
+          if (c.currentRangePoint != AssistRangePoint.pa) {
+            await singCurrentTarget(c);
+            return;
+          }
+          paSolos += 1;
+          if (paSolos <= 2) {
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.c));
+            return;
+          }
+          analysisDuringSoloListen = c.isPitchAnalysisEnabled;
+          await singCurrentTarget(c);
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      await controller.reportLowerSaAudible();
+
+      expect(assistedPasses, 1);
+      expect(analysisDuringAssist, isFalse);
+      expect(matchedDuringAssist, isFalse);
+      expect(analysisDuringSoloListen, isTrue);
+      expect(paSolos, greaterThan(2));
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      expect(controller.assistedAttemptCount, 0);
+      expect(controller.recoveryMode, AssistRecoveryMode.normal);
+    },
+  );
+
+  test(
+    'a failed solo after assisted practice offers a different sound',
+    () async {
+      var paSolos = 0;
+      var assistedPasses = 0;
+
+      final controller = buildPaController(
+        onWait: (c) async {
+          if (c.uiPhase == AssistUiPhase.assistedSinging) {
+            assistedPasses += 1;
+            expect(c.isPitchAnalysisEnabled, isFalse);
+            await singCurrentTarget(c);
+            expect(c.didMatchCurrentRangeTarget, isFalse);
+            return;
+          }
+          if (c.uiPhase != AssistUiPhase.listening) {
+            return;
+          }
+          if (!c.isExploringRange) {
+            await emitPitch(detectionService, Pitch.cSharp);
+            return;
+          }
+          if (c.currentRangePoint != AssistRangePoint.pa) {
+            await singCurrentTarget(c);
+            return;
+          }
+          paSolos += 1;
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.c));
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await controller.reportLowerSaAudible();
+
+      expect(assistedPasses, 1);
+      expect(paSolos, 3);
+      expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+      expect(controller.didMatchCurrentRangeTarget, isFalse);
+      expect(controller.currentExploreCandidate, Pitch.cSharp);
+    },
+  );
+
+  test('stop during Pa reference does not restart audio', () async {
+    var stopped = false;
+    var playsAtStop = 0;
+    final controller = buildPaController(
+      onWait: (c) async {
+        if (!stopped &&
+            c.uiPhase == AssistUiPhase.playingReference &&
+            c.currentRangePoint == AssistRangePoint.pa) {
+          stopped = true;
+          playsAtStop = referenceSound.playCount;
+          await c.stopSession();
+          return;
+        }
+        if (c.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!c.isExploringRange) {
+          await emitPitch(detectionService, Pitch.cSharp);
+          return;
+        }
+        await singCurrentTarget(c);
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await controller.reportLowerSaAudible();
+
+    expect(stopped, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(controller.isSessionActive, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+    expect(detectionService.isListening, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(referenceSound.playCount, playsAtStop);
+    expect(controller.uiPhase, AssistUiPhase.intro);
+  });
+
+  test('stop during assisted singing leaves the session idle', () async {
+    var paSolos = 0;
+    var stopped = false;
+    final controller = buildPaController(
+      onWait: (c) async {
+        if (!stopped && c.uiPhase == AssistUiPhase.assistedSinging) {
+          stopped = true;
+          await c.stopSession();
+          return;
+        }
+        if (c.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!c.isExploringRange) {
+          await emitPitch(detectionService, Pitch.cSharp);
+          return;
+        }
+        if (c.currentRangePoint == AssistRangePoint.pa) {
+          paSolos += 1;
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.c));
+          return;
+        }
+        await singCurrentTarget(c);
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await controller.reportLowerSaAudible();
+
+    expect(stopped, isTrue);
+    expect(paSolos, 2);
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(controller.isSessionActive, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+    expect(detectionService.isListening, isFalse);
+    final plays = referenceSound.playCount;
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(referenceSound.playCount, plays);
+  });
+
+  test('stop during solo listening does not continue the round', () async {
+    var stopped = false;
+    final controller = buildPaController(
+      onWait: (c) async {
+        if (!stopped &&
+            c.uiPhase == AssistUiPhase.listening &&
+            c.currentRangePoint == AssistRangePoint.pa) {
+          stopped = true;
+          expect(c.isPitchAnalysisEnabled, isTrue);
+          await c.stopSession();
+          return;
+        }
+        if (c.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!c.isExploringRange) {
+          await emitPitch(detectionService, Pitch.cSharp);
+          return;
+        }
+        await singCurrentTarget(c);
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    await controller.reportLowerSaAudible();
+
+    expect(stopped, isTrue);
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(detectionService.isListening, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+    expect(controller.isSessionActive, isFalse);
+  });
+
+  test(
+    'first Stage 2 miss retries the same sound without assistance',
+    () async {
+      var lowerListens = 0;
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          lowerListens += 1;
+          if (lowerListens == 1) {
+            expect(c.rangePointFailureCount, 0);
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+            return;
+          }
+          expect(c.rangePointFailureCount, 1);
+          expect(c.recoveryMode, AssistRecoveryMode.normal);
+          expect(c.currentExploreCandidate, Pitch.c);
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+
+      expect(lowerListens, 2);
+      expect(controller.assistedAttemptCount, 0);
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      expect(controller.uiPhase, isNot(AssistUiPhase.offeringEasierSound));
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  test('too-low recovery explores the next higher Shruti', () async {
+    var matchAfterMove = false;
+    Pitch? next;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        if (matchAfterMove) {
+          next ??= c.currentExploreCandidate;
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.currentExploreCandidate, Pitch.c);
+    expect(controller.guidedSingPassCount, 1);
+
+    matchAfterMove = true;
+    await controller.reportNoteTooLowForVoice();
+
+    expect(next, Pitch.cSharp);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.currentRangePoint, AssistRangePoint.lowerSa);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.usesLowerSaComfortQuestion, isTrue);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+  });
+
+  test('too-high recovery explores the next lower Shruti', () async {
+    var matchAfterMove = false;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.g,
+      onRangeListening: (c) async {
+        if (matchAfterMove) {
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(controller.currentExploreCandidate, Pitch.g);
+
+    matchAfterMove = true;
+    await controller.reportNoteTooHighForVoice();
+
+    expect(controller.currentExploreCandidate, Pitch.fSharp);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.usesLowerSaComfortQuestion, isFalse);
+    expect(controller.lastComfortableShruti, isNull);
+  });
+
+  test('not-sure recovery assists once more on the same note', () async {
+    var assistedPasses = 0;
+    var matchAfterHelp = false;
+    final controller = buildPaController(
+      onWait: (c) async {
+        if (c.uiPhase == AssistUiPhase.assistedSinging) {
+          assistedPasses += 1;
+          expect(c.isPitchAnalysisEnabled, isFalse);
+          expect(c.didMatchCurrentRangeTarget, isFalse);
+          return;
+        }
+        if (c.uiPhase != AssistUiPhase.listening) {
+          return;
+        }
+        if (!c.isExploringRange) {
+          await emitPitch(detectionService, Pitch.cSharp);
+          return;
+        }
+        if (matchAfterHelp) {
+          await singCurrentTarget(c);
+          return;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    expect(assistedPasses, 1);
+    expect(controller.guidedSingPassCount, 1);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+
+    matchAfterHelp = true;
+    await controller.requestGuidedNoteHelp();
+
+    expect(assistedPasses, 2);
+    expect(controller.guidedSingPassCount, 0);
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+  });
+
+  test(
+    'guided not-sure retries reopen the difficulty choice until the budget',
+    () async {
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.d,
+        onRangeListening: (c) async {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+      expect(controller.guidedSingPassCount, 1);
+
+      await controller.requestGuidedNoteHelp();
+      expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+      expect(controller.guidedSingPassCount, 2);
+      expect(controller.currentExploreCandidate, Pitch.d);
+
+      // Third guided pass exhaustion auto-moves nearby (no fourth choice loop).
+      await controller.requestGuidedNoteHelp();
+      expect(controller.currentExploreCandidate, Pitch.dSharp);
+      expect(controller.stage2PostOfferRetriesUsed, 1);
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.uiPhase, isNot(AssistUiPhase.refreshingStartingNote));
+      expect(controller.isSessionActive, isTrue);
+    },
+  );
+
+  test('exhausted guided recovery moves nearby then soft-completes', () async {
+    Pitch? nearby;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        if (c.currentExploreCandidate != Pitch.c) {
+          nearby = c.currentExploreCandidate;
+        }
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    await controller.requestGuidedNoteHelp();
+    await controller.requestGuidedNoteHelp();
+
+    expect(nearby, Pitch.cSharp);
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.referencePitch, Pitch.c);
+    expect(controller.isProvisionalRecommendation, isTrue);
+    expect(controller.stage2PostOfferRetriesUsed, 1);
+    expect(controller.isSessionActive, isTrue);
+    expect(controller.stage, AssistStage.exploringRange);
+    expect(controller.uiPhase, isNot(AssistUiPhase.refreshingStartingNote));
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+  });
+
+  test('stop during the easier-sound question ends the session', () async {
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+
+    await controller.stopSession();
+
+    expect(controller.uiPhase, AssistUiPhase.intro);
+    expect(controller.isSessionActive, isFalse);
+    expect(detectionService.isListening, isFalse);
+    expect(referenceSound.isPlaying, isFalse);
+  });
+
+  test(
+    'Pa strain while seekingHigher soft-completes with Stage 1 seed',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      await controller.reportLowerSaTooLow();
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+      expect(controller.currentExploreCandidate, Pitch.cSharp);
+
+      await answerLowerAudibleYes(controller);
+      expect(controller.uiPhase, AssistUiPhase.awaitingPaComfort);
+      await controller.reportPaStrained();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  test(
+    'Upper Sa strain while seekingHigher soft-completes with Stage 1 seed',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.c);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await controller.reportLowerSaTooLow();
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaStrained();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  test(
+    'Lower Sa too-low while seekingLower soft-completes with Stage 1 seed',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.g);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await reachUpperComfortQuestion(controller);
+      await controller.reportUpperSaStrained();
+      expect(controller.searchMode, AssistShrutiSearchMode.seekingLower);
+      expect(controller.currentExploreCandidate, Pitch.fSharp);
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+
+      await controller.reportLowerSaTooLow();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.g);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  test(
+    'supported upper boundary without comfortable uses Stage 1 seed',
+    () async {
+      final controller = buildRangeController(stage1Pitch: Pitch.b);
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+      await controller.reportLowerSaTooLow();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.b);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+
+  test(
+    'too-high with last comfortable stops at the verified boundary',
+    () async {
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.c,
+        onRangeListening: (c) async {
+          // Climb candidate cannot match — force recovery after C is verified.
+          if (c.currentExploreCandidate == Pitch.cSharp) {
+            await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+            return;
+          }
+          final hz = c.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      await answerLowerAudibleYes(controller);
+      await answerPaComfortableYes(controller);
+      await controller.reportUpperSaComfortable();
+      expect(controller.lastComfortableShruti, Pitch.c);
+      expect(controller.searchMode, AssistShrutiSearchMode.climbing);
+
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      while (controller.uiPhase != AssistUiPhase.offeringEasierSound &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+      expect(controller.currentExploreCandidate, Pitch.cSharp);
+
+      await controller.reportNoteTooHighForVoice();
+
+      expect(controller.uiPhase, AssistUiPhase.rangeBoundaryReached);
+      expect(controller.lastComfortableShruti, Pitch.c);
+      await controller.acknowledgeRangeBoundary();
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.referencePitch, Pitch.c);
+      expect(controller.isProvisionalRecommendation, isFalse);
+    },
+  );
+
+  test('too-low recovery preserves search and continues Stage 2', () async {
+    var matchAfterMove = false;
+    final controller = buildRangeController(
+      stage1Pitch: Pitch.c,
+      onRangeListening: (c) async {
+        if (!matchAfterMove) {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+          return;
+        }
+        final hz = c.currentRangeTargetHz;
+        if (hz != null) {
+          await emitHz(detectionService, hz);
+        }
+      },
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+    expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+    matchAfterMove = true;
+    await controller.reportNoteTooLowForVoice();
+
+    expect(controller.currentExploreCandidate, Pitch.cSharp);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.lastComfortableShruti, isNull);
+    expect(controller.stage1Shruti, Pitch.c);
+    expect(controller.isSessionActive, isTrue);
+
+    await answerLowerAudibleYes(controller);
+    await answerPaComfortableYes(controller);
+    expect(controller.uiPhase, AssistUiPhase.awaitingUpperComfort);
+    await controller.reportUpperSaComfortable();
+
+    expect(controller.lastComfortableShruti, Pitch.cSharp);
+    expect(controller.searchMode, AssistShrutiSearchMode.seekingHigher);
+    // seekingHigher stops at the first full fit.
+    expect(controller.uiPhase, AssistUiPhase.completed);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+  });
+
+  test('Stage 2 mic capture failure retries the same listen step', () async {
+    late final AssistModeController controller;
+    var armedStage2MicFail = false;
+    controller = AssistModeController(
+      detectionService: detectionService,
+      audioService: audioService,
+      candidateFinder: buildFinder(),
+      targetMatcher: buildMatcher(),
+      referenceSoundGenerator: referenceSound,
+      timing: fastTiming,
+      initialReferencePitch: Pitch.c,
+      prepareAudioSession: () async {},
+      wait: phasedWait(
+        () => controller,
+        onPhase: (phase) async {
+          if (phase != AssistUiPhase.listening) {
+            return;
+          }
+          if (!controller.isExploringRange) {
+            await emitPitch(detectionService, Pitch.c);
+            if (!armedStage2MicFail) {
+              armedStage2MicFail = true;
+              detectionService.remainingStartFailures = 1;
+            }
+            return;
+          }
+          final hz = controller.currentRangeTargetHz;
+          if (hz != null) {
+            await emitHz(detectionService, hz);
+          }
+        },
+      ),
+    );
+    addTearDown(controller.dispose);
+
+    await controller.startSession();
+
+    expect(controller.uiPhase, AssistUiPhase.awaitingLowerAudibility);
+    expect(controller.isSessionActive, isTrue);
+    expect(controller.currentExploreCandidate, Pitch.c);
+    expect(controller.rangePointFailureCount, 0);
+    expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    expect(controller.uiPhase, isNot(AssistUiPhase.intro));
+    expect(detectionService.startCount, greaterThan(1));
+  });
+
+  test(
+    'bounded recovery never refreshes endlessly after repeated wrong notes',
+    () async {
+      final controller = buildRangeController(
+        stage1Pitch: Pitch.e,
+        onRangeListening: (c) async {
+          await emitHz(detectionService, frequencyHzForPitch(Pitch.a));
+        },
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+      expect(controller.uiPhase, AssistUiPhase.offeringEasierSound);
+      await controller.requestGuidedNoteHelp();
+      await controller.requestGuidedNoteHelp();
+
+      expect(controller.uiPhase, AssistUiPhase.completed);
+      expect(controller.isProvisionalRecommendation, isTrue);
+      expect(controller.stage2PostOfferRetriesUsed, 1);
+      expect(
+        controller.guidedSingPassCount,
+        lessThanOrEqualTo(AssistModeController.maxGuidedAttemptsPerPitch),
+      );
+      expect(
+        controller.stage2PostOfferRetriesUsed,
+        lessThanOrEqualTo(AssistModeController.maxStage2PostOfferRetries),
+      );
+      expect(controller.uiPhase, isNot(AssistUiPhase.refreshingStartingNote));
+      expect(controller.isSessionActive, isTrue);
+    },
+  );
+
+  test(
+    'audio session prepare failure stays on intro without starting',
+    () async {
+      late final AssistModeController controller;
+      controller = AssistModeController(
+        detectionService: detectionService,
+        audioService: audioService,
+        candidateFinder: buildFinder(),
+        targetMatcher: buildMatcher(),
+        referenceSoundGenerator: referenceSound,
+        timing: fastTiming,
+        initialReferencePitch: Pitch.c,
+        prepareAudioSession: () async {
+          throw StateError('audio session unavailable');
+        },
+        wait: phasedWait(() => controller),
+      );
+      addTearDown(controller.dispose);
+
+      await controller.startSession();
+
+      expect(controller.uiPhase, AssistUiPhase.intro);
+      expect(controller.isSessionActive, isFalse);
+      expect(controller.errorMessage, "Let's try that again in a moment.");
+      expect(controller.uiPhase, isNot(AssistUiPhase.completed));
+      expect(controller.uiPhase, isNot(AssistUiPhase.rangeUnresolved));
+    },
+  );
+}

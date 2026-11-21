@@ -1,0 +1,220 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:harmony/audio/audio_assets.dart';
+import 'package:harmony/models/pitch.dart';
+import 'package:harmony/state/drone_controller.dart';
+
+import '../support/fake_audio_service.dart';
+
+void main() {
+  late FakeAudioService audioService;
+  late DroneController controller;
+
+  setUp(() {
+    audioService = FakeAudioService();
+    controller = DroneController(audioService: audioService);
+  });
+
+  tearDown(() {
+    controller.dispose();
+  });
+
+  test('starts with C selected and not playing', () {
+    expect(controller.selectedPitch, Pitch.c);
+    expect(controller.isPlaying, isFalse);
+    expect(controller.errorMessage, isNull);
+  });
+
+  test('initialize loads the default C sample', () async {
+    await controller.initialize();
+
+    expect(audioService.loadCount, 1);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.c));
+    expect(controller.errorMessage, isNull);
+    expect(controller.isBusy, isFalse);
+  });
+
+  test('initialize surfaces load errors', () async {
+    audioService.failLoad = true;
+
+    await controller.initialize();
+
+    expect(controller.errorMessage, 'Failed to load the tanpura sample.');
+    expect(controller.isPlaying, isFalse);
+  });
+
+  test('selectPitch while paused only updates selected state', () async {
+    await controller.initialize();
+    final loadCountBefore = audioService.loadCount;
+
+    await controller.selectPitch(Pitch.d);
+
+    expect(controller.selectedPitch, Pitch.d);
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.loadCount, loadCountBefore);
+    expect(audioService.playCount, 0);
+  });
+
+  test('selectPitch can change every Sa option', () async {
+    await controller.initialize();
+
+    for (final pitch in Pitch.values) {
+      await controller.selectPitch(pitch);
+      expect(controller.selectedPitch, pitch);
+    }
+  });
+
+  test('selectPitch while playing switches to the matching sample', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    final pauseCountBefore = audioService.pauseCount;
+
+    await controller.selectPitch(Pitch.cSharp);
+
+    expect(controller.isPlaying, isTrue);
+    expect(controller.selectedPitch, Pitch.cSharp);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.cSharp));
+    expect(audioService.pauseCount, pauseCountBefore);
+  });
+
+  test('selectPitch while playing switches across available samples', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+
+    for (final pitch in [Pitch.d, Pitch.g, Pitch.b, Pitch.c]) {
+      await controller.selectPitch(pitch);
+      expect(controller.isPlaying, isTrue);
+      expect(audioService.currentAsset, AudioAssets.sampleFor(pitch));
+    }
+  });
+
+  test('play loads the selected sample that was chosen while paused', () async {
+    await controller.initialize();
+    await controller.selectPitch(Pitch.aSharp);
+
+    await controller.togglePlayback();
+
+    expect(controller.isPlaying, isTrue);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.aSharp));
+  });
+
+  test('togglePlayback plays then pauses', () async {
+    await controller.initialize();
+
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+    expect(audioService.playCount, 1);
+
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.pauseCount, 1);
+  });
+
+  test('pausePlayback stops Home-owned continuous audio', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    await controller.pausePlayback();
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+    expect(audioService.pauseCount, greaterThanOrEqualTo(1));
+  });
+
+  test('pausePlayback is a no-op when already paused', () async {
+    await controller.initialize();
+    final pauseCountBefore = audioService.pauseCount;
+
+    await controller.pausePlayback();
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.pauseCount, pauseCountBefore + 1);
+  });
+
+  test('pausePlayback cancels in-flight togglePlayback play', () async {
+    await controller.initialize();
+    final gate = Completer<void>();
+    audioService.blockPlay = gate.future;
+
+    final toggleFuture = controller.togglePlayback();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isBusy, isTrue);
+
+    await controller.pausePlayback();
+    expect(controller.isPlaying, isFalse);
+
+    gate.complete();
+    await toggleFuture;
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+  });
+
+  test('pausePlayback cancels in-flight selectPitch resume', () async {
+    await controller.initialize();
+    await controller.togglePlayback();
+    expect(controller.isPlaying, isTrue);
+
+    final gate = Completer<void>();
+    audioService.blockLoad = gate.future;
+
+    final selectFuture = controller.selectPitch(Pitch.d);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isBusy, isTrue);
+    expect(controller.selectedPitch, Pitch.d);
+
+    await controller.pausePlayback();
+    expect(controller.isPlaying, isFalse);
+
+    gate.complete();
+    await selectFuture;
+
+    expect(controller.isPlaying, isFalse);
+    expect(audioService.isPlaying, isFalse);
+    expect(controller.selectedPitch, Pitch.d);
+  });
+
+  test('togglePlayback surfaces play errors', () async {
+    await controller.initialize();
+    audioService.failPlay = true;
+
+    await controller.togglePlayback();
+
+    expect(controller.errorMessage, 'Failed to play the tanpura sample.');
+    expect(controller.isPlaying, isFalse);
+  });
+
+  test('playPitch selects the pitch and starts playback', () async {
+    await controller.initialize();
+    await controller.selectPitch(Pitch.d);
+    expect(controller.isPlaying, isFalse);
+
+    await controller.playPitch(Pitch.cSharp);
+
+    expect(controller.selectedPitch, Pitch.cSharp);
+    expect(controller.isPlaying, isTrue);
+    expect(audioService.isPlaying, isTrue);
+    expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.cSharp));
+  });
+
+  test(
+    'playPitch switches from a previous selection without a second tap',
+    () async {
+      await controller.initialize();
+      await controller.playPitch(Pitch.d);
+      final playCountAfterFirst = audioService.playCount;
+
+      await controller.playPitch(Pitch.fSharp);
+
+      expect(controller.selectedPitch, Pitch.fSharp);
+      expect(controller.isPlaying, isTrue);
+      expect(audioService.playCount, greaterThan(playCountAfterFirst));
+      expect(audioService.currentAsset, AudioAssets.sampleFor(Pitch.fSharp));
+    },
+  );
+}
